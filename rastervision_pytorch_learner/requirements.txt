@@ -1,7 +1,7 @@
 rastervision_pipeline==0.13.*
 rastervision_core==0.13.*
 numpy<1.22
-pillow==8.3.*
+pillow==9.0.*
 torchvision==0.10.*
 torch==1.9.*
 tensorboard==2.5.*
@@ -11,3 +11,5 @@ pycocotools==2.0.*
 future==0.18.*
 psutil==5.8.*
 triangle==20200424
+opencv-python==4.1.*
+opencv-python-headless<4.3
