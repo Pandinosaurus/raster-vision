@@ -4,7 +4,7 @@ numpy==1.23.3
 pillow==9.3.0
 torch==1.12.1
 torchvision==0.13.1
-tensorboard==2.10.1
+tensorboard==2.12.0
 albumentations==1.3.0
 cython==0.29.32
 pycocotools==2.0.5
