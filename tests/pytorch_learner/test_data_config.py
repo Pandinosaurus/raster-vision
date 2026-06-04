@@ -1,8 +1,10 @@
-from typing import Callable
+from collections.abc import Callable
 import unittest
 
 from rastervision.pipeline.file_system import get_tmp_dir
 from rastervision.pipeline.config import (ValidationError, build_config)
+from rastervision.core.rv_pipeline import (WindowSamplingConfig,
+                                           WindowSamplingMethod)
 from rastervision.pytorch_learner import (
     DataConfig, ImageDataConfig, SemanticSegmentationDataConfig,
     SemanticSegmentationImageDataConfig, SemanticSegmentationGeoDataConfig,
@@ -10,9 +12,8 @@ from rastervision.pytorch_learner import (
     RegressionDataConfig, RegressionImageDataConfig, ObjectDetectionDataConfig,
     ObjectDetectionImageDataConfig, data_config_upgrader,
     ss_data_config_upgrader, clf_data_config_upgrader,
-    reg_data_config_upgrader, objdet_data_config_upgrader, GeoDataWindowConfig,
-    GeoDataWindowMethod, GeoDataConfig, PlotOptions,
-    ss_image_data_config_upgrader)
+    reg_data_config_upgrader, objdet_data_config_upgrader, GeoDataConfig,
+    PlotOptions, ss_image_data_config_upgrader)
 from rastervision.core.data import DatasetConfig, ClassConfig
 
 
@@ -71,10 +72,23 @@ class TestDataConfig(unittest.TestCase):
         except Exception:
             self.fail(msg)
 
-    def test_upgrader(self):
+    def test_upgrader_v2(self):
         old_cfg_dict = DataConfig().dict()
         del old_cfg_dict['img_channels']
         new_cfg_dict = data_config_upgrader(old_cfg_dict, version=2)
+        self.assertNoError(lambda: build_config(new_cfg_dict))
+
+    def test_upgrader_v6(self):
+        class_names = ['bg', 'fg']
+        class_colors = ['black', 'white']
+        old_cfg_dict = DataConfig().dict()
+        old_cfg_dict['class_names'] = class_names
+        old_cfg_dict['class_colors'] = class_colors
+        del old_cfg_dict['class_config']
+        new_cfg_dict = data_config_upgrader(old_cfg_dict, version=6)
+        self.assertIn('class_config', new_cfg_dict)
+        self.assertListEqual(new_cfg_dict['class_config'].names, class_names)
+        self.assertListEqual(new_cfg_dict['class_config'].colors, class_colors)
         self.assertNoError(lambda: build_config(new_cfg_dict))
 
 
@@ -102,7 +116,7 @@ class TestSemanticSegmentationGeoDataConfig(unittest.TestCase):
             class_config=ClassConfig(names=['abc']))
         old_cfg = SemanticSegmentationGeoDataConfig(
             scene_dataset=scene_dataset,
-            window_opts=GeoDataWindowConfig(size=100),
+            sampling=WindowSamplingConfig(size=100),
             img_channels=8)
         old_cfg_dict = old_cfg.dict()
         old_cfg_dict['channel_display_groups'] = None
@@ -181,6 +195,7 @@ class TestImageDataConfig(unittest.TestCase):
 
         nclasses = 2
         class_names = [f'class_{i}' for i in range(nclasses)]
+        class_config = ClassConfig(names=class_names)
         chip_sz = 100
         img_sz = 200
         nchannels = 3
@@ -190,7 +205,7 @@ class TestImageDataConfig(unittest.TestCase):
             data_dir = join(tmp_dir, 'data')
             for split in ['train', 'valid']:
                 os.makedirs(join(data_dir, split))
-                for c in class_names:
+                for c in class_config.names:
                     class_dir = join(data_dir, split, c)
                     os.makedirs(class_dir)
                     for i in range(nchips):
@@ -206,7 +221,7 @@ class TestImageDataConfig(unittest.TestCase):
             # data config -- unzipped
             data_cfg = ClassificationImageDataConfig(
                 uri=data_dir,
-                class_names=class_names,
+                class_config=class_config,
                 img_channels=nchannels,
                 img_sz=img_sz)
             train_ds, val_ds, test_ds = data_cfg.build(tmp_dir)
@@ -228,7 +243,7 @@ class TestImageDataConfig(unittest.TestCase):
             zipdir(data_dir, zip_path)
             data_cfg = ClassificationImageDataConfig(
                 uri=zip_path,
-                class_names=class_names,
+                class_config=class_config,
                 img_channels=nchannels,
                 img_sz=img_sz)
             train_ds, val_ds, test_ds = data_cfg.build(tmp_dir)
@@ -254,6 +269,7 @@ class TestImageDataConfig(unittest.TestCase):
 
         nclasses = 2
         class_names = [f'class_{i}' for i in range(nclasses)]
+        class_config = ClassConfig(names=class_names)
         chip_sz = 100
         img_sz = 200
         nchannels = 3
@@ -282,7 +298,7 @@ class TestImageDataConfig(unittest.TestCase):
             # data config -- unzipped
             data_cfg = SemanticSegmentationImageDataConfig(
                 uri=data_dir,
-                class_names=class_names,
+                class_config=class_config,
                 img_channels=nchannels,
                 img_sz=img_sz)
             train_ds, val_ds, test_ds = data_cfg.build(tmp_dir)
@@ -308,54 +324,58 @@ class TestGeoDataConfig(unittest.TestCase):
             self.fail(msg)
 
     def test_window_config(self):
-        # update() corrrectly initializes size_lims
-        args = dict(method=GeoDataWindowMethod.random, size=10)
-        self.assertNoError(lambda: GeoDataWindowConfig(**args))
-        self.assertEqual(GeoDataWindowConfig(**args).size_lims, (10, 11))
+        # update() correctly initializes size_lims
+        args = dict(method=WindowSamplingMethod.random, size=10)
+        self.assertNoError(lambda: WindowSamplingConfig(**args))
+        self.assertEqual(WindowSamplingConfig(**args).size_lims, (10, 11))
 
         # update() only initializes size_lims if method = random
-        args = dict(method=GeoDataWindowMethod.sliding, size=10)
-        self.assertEqual(GeoDataWindowConfig(**args).size_lims, None)
+        args = dict(method=WindowSamplingMethod.sliding, size=10)
+        self.assertEqual(WindowSamplingConfig(**args).size_lims, None)
 
         # only allow one of size_lims and h_lims+w_lims
         args = dict(
-            method=GeoDataWindowMethod.random,
+            method=WindowSamplingMethod.random,
             size=10,
             size_lims=(10, 20),
             h_lims=(10, 20),
             w_lims=(10, 20))
-        self.assertRaises(ValidationError, lambda: GeoDataWindowConfig(**args))
+        self.assertRaises(ValidationError,
+                          lambda: WindowSamplingConfig(**args))
 
         # require both h_lims and w_lims if either specified
         args = dict(
-            method=GeoDataWindowMethod.random,
+            method=WindowSamplingMethod.random,
             size=10,
             h_lims=None,
             w_lims=(10, 20))
-        self.assertRaises(ValidationError, lambda: GeoDataWindowConfig(**args))
+        self.assertRaises(ValidationError,
+                          lambda: WindowSamplingConfig(**args))
 
         # require both h_lims and w_lims if either specified
         args = dict(
-            method=GeoDataWindowMethod.random,
+            method=WindowSamplingMethod.random,
             size=10,
             h_lims=(10, 20),
             w_lims=None)
-        self.assertRaises(ValidationError, lambda: GeoDataWindowConfig(**args))
+        self.assertRaises(ValidationError,
+                          lambda: WindowSamplingConfig(**args))
 
         # only allow one of size_lims and h_lims+w_lims
         args = dict(
-            method=GeoDataWindowMethod.random,
+            method=WindowSamplingMethod.random,
             size=10,
             size_lims=(10, 20),
             h_lims=(10, 20),
             w_lims=None)
-        self.assertRaises(ValidationError, lambda: GeoDataWindowConfig(**args))
+        self.assertRaises(ValidationError,
+                          lambda: WindowSamplingConfig(**args))
 
-    def test_get_class_info_from_class_config_if_needed(self):
+    def test_get_class_config_from_dataset_if_needed(self):
         class_config = ClassConfig(names=['bg', 'fg'])
         scene_dataset = DatasetConfig(
             class_config=class_config, train_scenes=[], validation_scenes=[])
-        args = dict(scene_dataset=scene_dataset, window_opts={})
+        args = dict(scene_dataset=scene_dataset, sampling={})
         self.assertNoError(lambda: GeoDataConfig(**args))
 
         cfg = GeoDataConfig(**args)
@@ -416,10 +436,9 @@ class TestGeoDataConfig(unittest.TestCase):
             test_scenes=[make_scene(nchannels, nclasses) for _ in range(0)])
         data_cfg = SemanticSegmentationGeoDataConfig(
             scene_dataset=dataset_cfg,
-            window_opts=GeoDataWindowConfig(
+            sampling=WindowSamplingConfig(
                 size=chip_sz, stride=chip_sz, padding=0),
-            class_names=class_config.names,
-            class_colors=class_config.colors,
+            class_config=class_config,
             img_sz=img_sz,
             num_workers=0)
         with get_tmp_dir() as tmp_dir:

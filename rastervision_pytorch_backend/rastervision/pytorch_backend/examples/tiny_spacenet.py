@@ -9,7 +9,7 @@ from rastervision.pytorch_learner import *
 
 
 def get_config(runner) -> SemanticSegmentationConfig:
-    output_root_uri = '/opt/data/output/'
+    output_root_uri = '/opt/data/output/tiny_spacenet'
     class_config = ClassConfig(
         names=['building', 'background'], colors=['red', 'black'])
 
@@ -35,9 +35,9 @@ def get_config(runner) -> SemanticSegmentationConfig:
     backend = PyTorchSemanticSegmentationConfig(
         data=SemanticSegmentationGeoDataConfig(
             scene_dataset=scene_dataset,
-            window_opts=GeoDataWindowConfig(
+            sampling=WindowSamplingConfig(
                 # randomly sample training chips from scene
-                method=GeoDataWindowMethod.random,
+                method=WindowSamplingMethod.random,
                 # ... of size chip_sz x chip_sz
                 size=chip_sz,
                 # ... and at most 10 chips per scene
@@ -49,8 +49,7 @@ def get_config(runner) -> SemanticSegmentationConfig:
         root_uri=output_root_uri,
         dataset=scene_dataset,
         backend=backend,
-        train_chip_sz=chip_sz,
-        predict_chip_sz=chip_sz)
+        predict_options=SemanticSegmentationPredictOptions(chip_sz=chip_sz))
 
 
 def make_scene(scene_id: str, image_uri: str, label_uri: str,
@@ -66,12 +65,9 @@ def make_scene(scene_id: str, image_uri: str, label_uri: str,
     # configure GeoJSON reading
     vector_source = GeoJSONVectorSourceConfig(
         uris=label_uri,
-        # This assumes the CRS is WGS-84 and ignores whatever the CRS specified
-        # in the file is.
-        ignore_crs_field=True,
         # The geoms in the label GeoJSON do not have a "class_id" property, so
         # classes must be inferred. Since all geoms are for the building class,
-        # this is easy to do: we just assing the building class ID to all of
+        # this is easy to do: we just assign the building class ID to all of
         # them.
         transformers=[
             ClassInferenceTransformerConfig(

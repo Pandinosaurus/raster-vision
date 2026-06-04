@@ -1,16 +1,17 @@
-# flake8: noqa
-
 import os
 from os.path import join
 
-import albumentations as A
-
-from rastervision.core.rv_pipeline import *
-from rastervision.core.backend import *
-from rastervision.core.data import *
-from rastervision.core.analyzer import *
-from rastervision.pytorch_backend import *
-from rastervision.pytorch_learner import *
+from rastervision.core.rv_pipeline import (
+    ChipClassificationConfig, ChipOptions, PredictOptions,
+    WindowSamplingConfig, WindowSamplingMethod)
+from rastervision.core.data import (
+    ChipClassificationLabelSourceConfig, ClassConfig,
+    ClassInferenceTransformerConfig, DatasetConfig, GeoJSONVectorSourceConfig,
+    RasterioSourceConfig, SceneConfig)
+from rastervision.pytorch_backend import PyTorchChipClassificationConfig
+from rastervision.pytorch_learner import (
+    Backbone, ClassificationGeoDataConfig, ClassificationImageDataConfig,
+    ClassificationModelConfig, ExternalModuleConfig, SolverConfig)
 from rastervision.pytorch_backend.examples.utils import (get_scene_info,
                                                          save_image_crop)
 
@@ -36,23 +37,22 @@ def get_config(runner,
         processed_uri (str): Directory for storing processed data.
                              E.g. crops for testing.
         root_uri (str): Directory where all the output will be written.
-        external_model (bool, optional): If True, use an external model defined
+        external_model (bool): If True, use an external model defined
             by the ExternalModuleConfig. Defaults to False.
-        external_loss (bool, optional): If True, use an external loss defined
+        external_loss (bool): If True, use an external loss defined
             by the ExternalModuleConfig. Defaults to False.
-        augment (bool, optional): If True, use custom data augmentation
+        augment (bool): If True, use custom data augmentation
             transforms. Some basic data augmentation is done even if this is
             False. To completely disable, specify augmentors=[] is the dat
             config. Defaults to False.
-        nochip (bool, optional): If True, read directly from the TIFF during
+        nochip (bool): If True, read directly from the TIFF during
             training instead of from pre-generated chips. The analyze and chip
             commands should not be run, if this is set to True. Defaults to
             True.
-        test (bool, optional): If True, does the following simplifications:
+        test (bool): If True, does the following simplifications:
             (1) Uses only the first 1 scene
             (2) Uses only a 600x600 crop of the scenes
-            (3) Enables test mode in the learner, which makes it use the
-                test_batch_sz and test_num_epochs, among other things.
+            (3) Trains for only 4 epochs.
             Defaults to False.
 
     Returns:
@@ -100,7 +100,6 @@ def get_config(runner,
         label_source = ChipClassificationLabelSourceConfig(
             vector_source=GeoJSONVectorSourceConfig(
                 uris=label_uri,
-                ignore_crs_field=True,
                 transformers=[
                     ClassInferenceTransformerConfig(default_class_id=1)
                 ]),
@@ -123,22 +122,24 @@ def get_config(runner,
         train_scenes=train_scenes,
         validation_scenes=val_scenes)
 
-    if nochip:
-        window_opts = {}
-        for s in train_scenes:
-            window_opts[s.id] = GeoDataWindowConfig(
-                method=GeoDataWindowMethod.sliding,
-                size=chip_sz,
-                stride=chip_sz // 2)
-        for s in val_scenes:
-            window_opts[s.id] = GeoDataWindowConfig(
-                method=GeoDataWindowMethod.sliding,
-                size=chip_sz,
-                stride=chip_sz // 2)
+    window_sampling_opts = {}
+    for s in train_scenes:
+        window_sampling_opts[s.id] = WindowSamplingConfig(
+            method=WindowSamplingMethod.sliding,
+            size=chip_sz,
+            stride=chip_sz // 2)
+    for s in val_scenes:
+        window_sampling_opts[s.id] = WindowSamplingConfig(
+            method=WindowSamplingMethod.sliding,
+            size=chip_sz,
+            stride=chip_sz // 2)
 
+    chip_options = ChipOptions(sampling=window_sampling_opts)
+
+    if nochip:
         data = ClassificationGeoDataConfig(
             scene_dataset=scene_dataset,
-            window_opts=window_opts,
+            sampling=window_sampling_opts,
             img_sz=img_sz,
             num_workers=4)
     else:
@@ -173,8 +174,7 @@ def get_config(runner,
 
     solver = SolverConfig(
         lr=1e-4,
-        num_epochs=20,
-        test_num_epochs=4,
+        num_epochs=20 if not test else 4,
         batch_sz=32,
         one_cycle=True,
         external_loss_def=external_loss_def)
@@ -183,7 +183,6 @@ def get_config(runner,
         data=data,
         model=model,
         solver=solver,
-        test_mode=test,
         log_tensorboard=True,
         run_tensorboard=False)
 
@@ -191,7 +190,7 @@ def get_config(runner,
         root_uri=root_uri,
         dataset=scene_dataset,
         backend=backend,
-        train_chip_sz=chip_sz,
-        predict_chip_sz=chip_sz)
+        chip_options=chip_options,
+        predict_options=PredictOptions(chip_sz=chip_sz))
 
     return pipeline

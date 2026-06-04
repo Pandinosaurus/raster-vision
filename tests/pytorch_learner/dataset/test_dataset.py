@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from os.path import join
 import unittest
 
@@ -6,15 +7,27 @@ import numpy as np
 from shapely.geometry import Polygon, mapping
 
 from rastervision.pipeline.file_system import json_to_file, get_tmp_dir
+from rastervision.core.box import Box
 from rastervision.core.data import ClassConfig, RasterioCRSTransformer
 from rastervision.core.data.utils.geojson import (geometry_to_feature,
                                                   features_to_geojson)
 from rastervision.pytorch_learner.dataset import (
     SemanticSegmentationSlidingWindowGeoDataset,
     ClassificationSlidingWindowGeoDataset,
-    ObjectDetectionSlidingWindowGeoDataset)
+    ObjectDetectionSlidingWindowGeoDataset, RandomWindowGeoDataset,
+    SlidingWindowGeoDataset, TransformType)
 
 from tests import data_file_path
+
+
+class MockScene:
+    aoi_polygons_bbox_coords: list['Polygon'] = [
+        Box(0, 0, 10, 10).to_shapely()
+    ]
+    extent = Box(0, 0, 10, 10)
+
+    def __getitem__(self, key):
+        return np.empty((1, 1, 3)), np.empty((1, 1))
 
 
 def make_overlapping_geojson(uri: str) -> str:
@@ -137,6 +150,252 @@ class TestGeoDatasetFromURIs(unittest.TestCase):
         class_ids = y.get_field('class_ids')
         self.assertTupleEqual(bboxes.shape, (0, 4))
         self.assertTupleEqual(class_ids.shape, (0, ))
+
+
+class TestSlidingWindowGeoDataset(unittest.TestCase):
+    def test_sample_window_within_aoi(self):
+        scene = MockScene()
+        ds = SlidingWindowGeoDataset(
+            scene,
+            10,
+            5,
+            within_aoi=True,
+            transform_type=TransformType.noop,
+        )
+        self.assertEqual(len(ds.windows), 1)
+
+        ds = SlidingWindowGeoDataset(
+            scene,
+            8,
+            5,
+            within_aoi=False,
+            transform_type=TransformType.noop,
+        )
+        self.assertEqual(len(ds.windows), 4)
+
+    def test_out_size(self):
+        scene = MockScene()
+        ds = SlidingWindowGeoDataset(
+            scene,
+            size=5,
+            stride=5,
+            out_size=10,
+            transform_type=TransformType.semantic_segmentation,
+        )
+        x, y = ds[0]
+        self.assertTupleEqual(x.shape, (3, 10, 10))
+        self.assertTupleEqual(y.shape, (10, 10))
+
+    def test_return_window(self):
+        scene = MockScene()
+        ds = SlidingWindowGeoDataset(
+            scene,
+            10,
+            5,
+            transform_type=TransformType.noop,
+            return_window=True,
+        )
+        out = ds[0]
+        self.assertEqual(len(out), 2)
+        _, window = out
+        self.assertIsInstance(window, Box)
+
+
+class TestRandomWindowGeoDataset(unittest.TestCase):
+    def assertNoError(self, fn: Callable, msg: str = ''):
+        try:
+            fn()
+        except Exception:
+            self.fail(msg)
+
+    def test_sample_window_within_aoi(self):
+        scene = MockScene()
+
+        ds = RandomWindowGeoDataset(
+            scene,
+            out_size=10,
+            size_lims=(5, 6),
+            max_windows=10,
+            within_aoi=True,
+            transform_type=TransformType.noop,
+        )
+        self.assertNoError(ds.sample_window)
+
+        ds = RandomWindowGeoDataset(
+            scene,
+            out_size=10,
+            size_lims=(12, 13),
+            max_windows=10,
+            within_aoi=True,
+            transform_type=TransformType.noop,
+        )
+        self.assertRaises(StopIteration, ds.sample_window)
+
+        ds = RandomWindowGeoDataset(
+            scene,
+            out_size=10,
+            size_lims=(12, 13),
+            max_windows=10,
+            within_aoi=False,
+            transform_type=TransformType.noop,
+        )
+        self.assertNoError(ds.sample_window)
+
+    def test_init_validation(self):
+        scene = MockScene()
+
+        # neither size_lims or h/w_lims specified
+        args = dict(
+            scene=scene,
+            out_size=10,
+            max_windows=10,
+            transform_type=TransformType.noop,
+        )
+        self.assertRaises(ValueError, lambda: RandomWindowGeoDataset(**args))
+
+        # size_lims + h_lims specified
+        args = dict(
+            scene=scene,
+            out_size=10,
+            size_lims=(10, 11),
+            h_lims=(10, 11),
+            max_windows=10,
+            transform_type=TransformType.noop,
+        )
+        self.assertRaises(ValueError, lambda: RandomWindowGeoDataset(**args))
+
+        # size_lims + h_lims + w_lims specified
+        args = dict(
+            scene=scene,
+            out_size=10,
+            size_lims=(10, 11),
+            h_lims=(10, 11),
+            w_lims=(10, 11),
+            max_windows=10,
+            transform_type=TransformType.noop,
+        )
+        self.assertRaises(ValueError, lambda: RandomWindowGeoDataset(**args))
+
+        # only w_lims specified
+        args = dict(
+            scene=scene,
+            out_size=10,
+            w_lims=(10, 11),
+            max_windows=10,
+            transform_type=TransformType.noop,
+        )
+        self.assertRaises(ValueError, lambda: RandomWindowGeoDataset(**args))
+
+        # out_size=None
+        ds = RandomWindowGeoDataset(
+            scene,
+            out_size=None,
+            size_lims=(12, 13),
+            max_windows=10,
+            transform_type=TransformType.noop,
+        )
+        self.assertFalse(ds.normalize)
+        self.assertFalse(ds.to_pytorch)
+
+        # padding initialization
+        ds = RandomWindowGeoDataset(
+            scene,
+            out_size=None,
+            h_lims=(10, 11),
+            w_lims=(10, 11),
+            max_windows=10,
+            transform_type=TransformType.noop,
+        )
+        self.assertTupleEqual(ds.padding, (5, 5))
+
+    def test_min_max_size(self):
+        scene = MockScene()
+        ds = RandomWindowGeoDataset(
+            scene,
+            out_size=None,
+            size_lims=(10, 15),
+            max_windows=10,
+            transform_type=TransformType.noop,
+        )
+        self.assertTupleEqual(ds.min_size, (10, 10))
+        self.assertTupleEqual(ds.max_size, (15, 15))
+
+        ds = RandomWindowGeoDataset(
+            scene,
+            out_size=None,
+            h_lims=(10, 15),
+            w_lims=(8, 12),
+            max_windows=10,
+            transform_type=TransformType.noop,
+        )
+        self.assertTupleEqual(ds.min_size, (10, 8))
+        self.assertTupleEqual(ds.max_size, (15, 12))
+
+    def test_sample_window_size(self):
+        scene = MockScene()
+        ds = RandomWindowGeoDataset(
+            scene,
+            out_size=None,
+            size_lims=(10, 15),
+            max_windows=10,
+            transform_type=TransformType.noop,
+        )
+        sampled_h, sampled_w = ds.sample_window_size()
+        self.assertTrue(10 <= sampled_h < 15)
+        self.assertTrue(10 <= sampled_w < 15)
+
+        ds = RandomWindowGeoDataset(
+            scene,
+            out_size=None,
+            h_lims=(10, 15),
+            w_lims=(8, 12),
+            max_windows=10,
+            transform_type=TransformType.noop,
+        )
+        sampled_h, sampled_w = ds.sample_window_size()
+        self.assertTrue(10 <= sampled_h < 15)
+        self.assertTrue(8 <= sampled_w < 12)
+
+    def test_max_windows(self):
+        scene = MockScene()
+        ds = RandomWindowGeoDataset(
+            scene,
+            out_size=10,
+            size_lims=(10, 11),
+            max_windows=10,
+            transform_type=TransformType.noop,
+        )
+        self.assertRaises(StopIteration, lambda: ds[10])
+
+    def test_return_window(self):
+        scene = MockScene()
+        ds = RandomWindowGeoDataset(
+            scene,
+            out_size=10,
+            size_lims=(5, 6),
+            max_windows=10,
+            transform_type=TransformType.noop,
+            return_window=True,
+        )
+        out = ds[0]
+        self.assertEqual(len(out), 2)
+        _, window = out
+        self.assertIsInstance(window, Box)
+
+    def test_triangle_missing(self):
+        import sys
+        sys.modules['triangle'] = None
+        scene = MockScene()
+        args = dict(
+            scene=scene,
+            out_size=10,
+            size_lims=(5, 6),
+            max_windows=10,
+            transform_type=TransformType.noop,
+        )
+        self.assertNoError(lambda: RandomWindowGeoDataset(**args))
+        ds = RandomWindowGeoDataset(**args)
+        self.assertIsNone(ds.aoi_sampler)
 
 
 if __name__ == '__main__':

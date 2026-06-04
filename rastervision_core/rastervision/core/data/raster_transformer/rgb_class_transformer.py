@@ -1,4 +1,5 @@
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, Literal
+from pydantic.types import PositiveInt as PosInt
 
 import numpy as np
 
@@ -26,7 +27,7 @@ class RGBClassTransformer(RasterTransformer):
         self.rgb_int_to_class_tf = ReclassTransformer(self.rgb_int_to_class)
 
         class_to_color_triple = {
-            class_id: color_to_triple(col)
+            class_id: color_to_triple(col) if isinstance(col, str) else col
             for col, class_id in color_to_class.items()
         }
         # i-th row of this array is the color-triple of the i-th class
@@ -37,19 +38,14 @@ class RGBClassTransformer(RasterTransformer):
             ],
             dtype=np.uint8)
 
-    def transform(self,
-                  chip: np.ndarray,
-                  channel_order: Optional[List[int]] = None) -> np.ndarray:
+    def transform(self, chip: np.ndarray) -> np.ndarray:
         """Transform RGB array to array of class IDs or vice versa.
 
         Args:
-            chip (np.ndarray): Numpy array of shape (H, W, 3).
-            channel_order (Optional[List[int]], optional): List of indices of
-                channels that were extracted from the raw imagery.
-                Defaults to None.
+            chip: Numpy array of shape (H, W, 3).
 
         Returns:
-            np.ndarray: An array of class IDs.
+            An array of class IDs of shape (H, W, 1).
         """
         return self.rgb_to_class(chip)
 
@@ -60,3 +56,12 @@ class RGBClassTransformer(RasterTransformer):
 
     def class_to_rgb(self, class_labels: np.ndarray) -> np.ndarray:
         return self.class_to_rgb_arr[class_labels]
+
+    def get_out_channels(self, in_channels: PosInt) -> Literal[1]:
+        if in_channels != 3:
+            raise ValueError(
+                'RGBClassTransformer only accepts 3-channel inputs.')
+        return 1
+
+    def get_out_dtype(self, in_dtype: np.dtype) -> np.dtype:
+        return np.dtype(np.uint8)

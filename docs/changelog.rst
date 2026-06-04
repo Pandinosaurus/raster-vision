@@ -1,6 +1,234 @@
 CHANGELOG
 =========
 
+
+Raster Vision 0.31.1
+--------------------
+
+* Fixes:
+
+  * Restore compatibility with python<3.11 by only importing ``typing.Self`` under ``if TPYE_CHECKING`` (`#2221 <https://github.com/azavea/raster-vision/pull/2221>`__)
+  * Remove ``awscli`` as a dependency from ``rastervision_aws_s3`` and make it a dev dependency instead (`#2220 <https://github.com/azavea/raster-vision/pull/2220>`__)
+  * Make ``max_windows`` a required argument for ``RandomWindowGeoDataset`` (`#2223 <https://github.com/azavea/raster-vision/pull/2223>`__)
+
+* Maintenance:
+
+  * Update docker dependency: Bump jupyterlab from 4.1.8 to 4.2.5 (`#2224 <https://github.com/azavea/raster-vision/pull/2224>`__)
+
+
+Raster Vision 0.31.0
+--------------------
+
+This release migrates Raster Vision to pydantic v2 (it will no longer work with v1) and makes several other improvements and fixes. There are a few breaking changes; see the :doc:`migration guide <migration/v0-30_to_v0-31>`.
+
+* Features:
+
+  * Add ``MultiRasterSource.from_stac()`` constructor (`#2156 <https://github.com/azavea/raster-vision/pull/2156>`__)
+  * Use smarter default padding value for sliding windows (`#2190 <https://github.com/azavea/raster-vision/pull/2190>`__)
+  * Use rasterio AWS session in ``RasterioSource`` when reading files on S3 (`#2197 <https://github.com/azavea/raster-vision/pull/2197>`__)
+  * Determine ``num_channels`` and ``dtype`` in ``RasterSource`` statically without reading a chip (`#2212 <https://github.com/azavea/raster-vision/pull/2212>`__)
+
+* Refactor:
+
+  * Compute ``RasterStats`` from transformed ``RasterSource`` (`#2211 <https://github.com/azavea/raster-vision/pull/2211>`__)
+
+* Fixes:
+
+  * Migrate to pydantic v2 (`#2178 <https://github.com/azavea/raster-vision/pull/2178>`__)
+  * Fix bug in ``ChipClassificationSource.__getitem__()`` when bbox is specified (`#2193 <https://github.com/azavea/raster-vision/pull/2193>`__)
+
+* Maintenance:
+
+  * Update codecov action to v4 and use token (`#2172 <https://github.com/azavea/raster-vision/pull/2172>`__)
+  * Type hint improvements (`#2192 <https://github.com/azavea/raster-vision/pull/2192>`__, `#2195 <https://github.com/azavea/raster-vision/pull/2195>`__, `#2210 <https://github.com/azavea/raster-vision/pull/2210>`__)
+  * Update CLA instructions (`#2196 <https://github.com/azavea/raster-vision/pull/2196>`__)
+
+
+Raster Vision 0.30.1
+--------------------
+
+* Features:
+
+  * Allow passing pipeline configs as JSON files to ``rastervision run`` CLI cmd (`#2136 <https://github.com/azavea/raster-vision/pull/2136>`__)
+
+* Fixes:
+
+  * Add ``rastervision_aws_sagemaker`` to API reference on RTD (`#2117 <https://github.com/azavea/raster-vision/pull/2117>`__)
+  * Let ``RasterSource.get_chip_by_map_window()`` take all ``.get_chip()`` args (`#2136 <https://github.com/azavea/raster-vision/pull/2136>`__)
+  * Make repr more concise for some configs (`#2136 <https://github.com/azavea/raster-vision/pull/2136>`__)
+  * Misc config serialization fixes and improvements (`#2136 <https://github.com/azavea/raster-vision/pull/2136>`__)
+  * Avoid double-wrapping model in ``DistributedDataParallel`` (`#2136 <https://github.com/azavea/raster-vision/pull/2136>`__)
+  * Make ``S3FileSystem.list_paths()`` only list direct children (`#2136 <https://github.com/azavea/raster-vision/pull/2136>`__)
+  * Add missing ``RequestPayer`` arg to some s3-related boto3 API calls (`#2136 <https://github.com/azavea/raster-vision/pull/2136>`__)
+  * Fix incorrect path in RV pipeline examples doc (`#2138 <https://github.com/azavea/raster-vision/pull/2138>`__)
+* Maintenance:
+
+  * Update docker dependencies (`#2116 <https://github.com/azavea/raster-vision/pull/2116>`__, `#2122 <https://github.com/azavea/raster-vision/pull/2122>`__)
+  * Tweak coverage report generation (`#2136 <https://github.com/azavea/raster-vision/pull/2136>`__)
+
+
+Raster Vision 0.30
+------------------
+
+This release brings exciting new functionality and major usability improvements to Raster Vision. 
+
+Highlights
+~~~~~~~~~~
+
+- **Easier installation:** Raster Vision no longer requires exact versions of dependencies, which means it can more easily be installed alongside other packages!
+- **AWS SageMaker support:** you can now run Raster Vision jobs on SageMaker via
+
+  .. code-block:: python
+
+    rastervision run sagemaker ...
+  
+  You can even run training over multiple instances with multiple GPUs! See :ref:`aws sagemaker setup` for more details.
+- **Distributed training support:** Raster Vision ``Learners`` now support distributed training (both multi-node and multi-GPU) via `PyTorch DDP <https://pytorch.org/docs/stable/notes/ddp.html>`__. If your machine has multiple GPUs, Raster Vision will now automatically use them all during training.
+- **New CLI command**, :ref:`cli predict_scene`, that allows greater configurability than the ``predict`` command.
+
+  .. code-block:: python
+
+    rastervision predict_scene <model_bundle_uri> <scene_config_uri> [--predict_options_uri <predict_options_uri>]
+- **New tutorial:** :doc:`usage/tutorials/onnx_inference`.
+
+API changes
+~~~~~~~~~~~
+
+This release makes a number of breaking changes; however, it should still be backward compatible with older model-bundles. See the :doc:`migration guide <migration/v0-21_to_v0-30>` for more details.
+
+Full changelog
+~~~~~~~~~~~~~~
+
+Features
+^^^^^^^^
+
+* Add AWS SageMaker support via new ``rastervision_aws_sagemaker`` module. (`#1968 <https://github.com/azavea/raster-vision/pull/1968>`__, `#1986 <https://github.com/azavea/raster-vision/pull/1986>`__, `#2031 <https://github.com/azavea/raster-vision/pull/2031>`__, `#2098 <https://github.com/azavea/raster-vision/pull/2098>`__)
+* Add a ``predict_scene`` CLI command that makes predictions on a scene specified by a SceneConfig (`#1979 <https://github.com/azavea/raster-vision/pull/1979>`__)
+* Add ``XarraySourceConfig`` to allow specifying an ``XarraySource`` from STAC Items (`#1980 <https://github.com/azavea/raster-vision/pull/1980>`__)
+* Add Apple Silicon GPU Acceleration (`#1985 <https://github.com/azavea/raster-vision/pull/1985>`__)
+* Add support for distributed training (multi-node and multi-GPU) via PyTorch DDP (`#2018 <https://github.com/azavea/raster-vision/pull/2018>`__, `#2028 <https://github.com/azavea/raster-vision/pull/2028>`__)
+* Allow specifying class probability thresholds for semantic segmentation vectorization (`#2057 <https://github.com/azavea/raster-vision/pull/2057>`__)
+* Allow reading GeoJSONs with non-epsg:4326 CRS's (`#2101 <https://github.com/azavea/raster-vision/pull/2101>`__)
+* Add ``within_aoi`` arg to ``GeoDataset`` (`#2088 <https://github.com/azavea/raster-vision/pull/2088>`__)
+* Add ``class_name_mapping`` to ``ClassInferenceTransformer`` (`#2088 <https://github.com/azavea/raster-vision/pull/2088>`__)
+* Add ``Config.deserialize()`` method for instantiating ``Configs`` from a file or dict (`#2088 <https://github.com/azavea/raster-vision/pull/2088>`__)
+* Add a ``.run_command()`` method to ``Runners`` (`#1981 <https://github.com/azavea/raster-vision/pull/1981>`__)
+* Allow ``Visualizers`` to plot predictions without ground truth (`#1987 <https://github.com/azavea/raster-vision/pull/1987>`__)
+* Allow ``ChipClassificationLabelSource`` to load scores, if available, when reading labels (`#1988 <https://github.com/azavea/raster-vision/pull/1988>`__)
+* Allow passing ``out_size`` param to ``SlidingWindowGeoDataset`` (`#2099 <https://github.com/azavea/raster-vision/pull/2099>`__)
+* Define ``XarraySource.from_stac()`` for more convenient creation of an ``XarraySource`` from a STAC ``Item`` or ``ItemCollection`` (`#2061 <https://github.com/azavea/raster-vision/pull/2061>`__)
+
+Refactoring
+^^^^^^^^^^^
+
+* Allow setting some Learner-related params via environment variables (or other Everett config options) (`#1978 <https://github.com/azavea/raster-vision/pull/1978>`__)
+* Refactor ``DataConfig`` and implement ``DataConfig.build_dataset()`` (`#2023 <https://github.com/azavea/raster-vision/pull/2023>`__)
+* Reconcile chip-sampling functionality in ``RVPipelines`` with ``GeoDatasets`` (#1496) (`#2040 <https://github.com/azavea/raster-vision/pull/2040>`__)
+* Consolidate prediction options into ``PredictOptions`` for all tasks (`#2055 <https://github.com/azavea/raster-vision/pull/2055>`__)
+* Simplify inference with ONNX models (`#2060 <https://github.com/azavea/raster-vision/pull/2060>`__)
+
+Docs
+^^^^
+
+* Misc. minor docs fixes (`#1993 <https://github.com/azavea/raster-vision/pull/1993>`__)
+* Fix typos in notebook (`#1967 <https://github.com/azavea/raster-vision/pull/1967>`__)
+* Add a tutorial notebook for ONNX inference (`#2062 <https://github.com/azavea/raster-vision/pull/2062>`__)
+
+Maintenance/bug fixes
+^^^^^^^^^^^^^^^^^^^^^
+* Fix formatting in CONTRIBUTING.rst (`#1965 <https://github.com/azavea/raster-vision/pull/1965>`__)
+* Improve unit test coverage of CLI and Runners (`#1966 <https://github.com/azavea/raster-vision/pull/1966>`__)
+* Update PR template (`#1982 <https://github.com/azavea/raster-vision/pull/1982>`__)
+* Remove the ``typing_extensions`` dependency (`#1992 <https://github.com/azavea/raster-vision/pull/1992>`__)
+* Remove legacy test, overfit, and predict modes from Learner (`#2024 <https://github.com/azavea/raster-vision/pull/2024>`__)
+* Misc. minor fixes and improvements to examples (`#2033 <https://github.com/azavea/raster-vision/pull/2033>`__)
+* Bug fix: use correct transforms for val & test sets in ``GeoDataConfig._build_datasets()`` (`#2039 <https://github.com/azavea/raster-vision/pull/2039>`__)
+* Remove ``LearnerPipeline`` and ``LearnerPipelineConfig`` (`#2056 <https://github.com/azavea/raster-vision/pull/2056>`__)
+* Fix handing of some edge cases when reading chips from ``XarraySource`` (`#2058 <https://github.com/azavea/raster-vision/pull/2058>`__)
+* Fix circular import problems (`#2059 <https://github.com/azavea/raster-vision/pull/2059>`__)
+* Ignore version constraints in setup.py's (`#2065 <https://github.com/azavea/raster-vision/pull/2065>`__)
+* Add ``THIRD_PARTY_LICENSES.txt`` (`#2072 <https://github.com/azavea/raster-vision/pull/2072>`__)
+* Misc. docker fixes (`#2085 <https://github.com/azavea/raster-vision/pull/2085>`__)
+* Misc. minor fixes (`#1984 <https://github.com/azavea/raster-vision/pull/1984>`__, `#1994 <https://github.com/azavea/raster-vision/pull/1994>`__, `#2053 <https://github.com/azavea/raster-vision/pull/2053>`__, `#2088 <https://github.com/azavea/raster-vision/pull/2088>`__)
+* Make ``DataConfig`` take a ``ClassConfig`` instead of ``class_names`` and ``class_colors`` separately (`#2100 <https://github.com/azavea/raster-vision/pull/2100>`__)
+* Pre-release fixes (`#2105 <https://github.com/azavea/raster-vision/pull/2105>`__)
+
+----
+
+Raster Vision 0.21.3
+--------------------
+
+* Features:
+
+  * Allow reading pre-chipped datasets with non-RGB TIFF chips (`#1932 <https://github.com/azavea/raster-vision/pull/1932>`__)
+
+* Fixes:
+
+  * Normalize pixel values in the Spacenet Vegas examples  (`#1930 <https://github.com/azavea/raster-vision/pull/1930>`__)
+  * Account for ``bbox`` when saving predictions  (`#1931 <https://github.com/azavea/raster-vision/pull/1931>`__)
+  * Ensure SS datasets always return label array with correct ``dtype`` (`#1954 <https://github.com/azavea/raster-vision/pull/1954>`__)
+  * Fix bug in ``Visualizer`` when plotting temporal data w/ batch size 1 (`#1958 <https://github.com/azavea/raster-vision/pull/1958>`__)
+  * Allow specifying ``chip_sz`` in ``StatsTransform.from_raster_sources()``  (`#1933 <https://github.com/azavea/raster-vision/pull/1933>`__)
+  * Misc. minor fixes  (`#1933 <https://github.com/azavea/raster-vision/pull/1933>`__)
+* Docs:
+
+  * Update release instructions to simplify patch release process (`#1934 <https://github.com/azavea/raster-vision/pull/1934>`__)
+* Maintenance:
+
+  * Bump pillow to address CVE-2023-4863 (`#1952 <https://github.com/azavea/raster-vision/pull/1952>`__)
+  * Update CI and release workflows to free up disk space before building docker image (`#1953 <https://github.com/azavea/raster-vision/pull/1953>`__, `#1959 <https://github.com/azavea/raster-vision/pull/1959>`__)
+
+----
+
+Raster Vision 0.21.2
+--------------------
+
+* Features:
+
+  * Save model weights for each epoch 1720 (`#1921 <https://github.com/azavea/raster-vision/pull/1921>`__)
+
+* Bug fixes:
+
+  * Do not require every plugin recorded in the model bundle to be installed when using it (`#1916 <https://github.com/azavea/raster-vision/pull/1916>`__)
+  * Fix ``rastervision.core`` dependencies  (`#1920 <https://github.com/azavea/raster-vision/pull/1920>`__)
+* Docs:
+
+  * Document config upgrader mechanism (`#1917 <https://github.com/azavea/raster-vision/pull/1917>`__)
+* Maintenance:
+
+  * Update GitHub actions' versions (`#1913 <https://github.com/azavea/raster-vision/pull/1913>`__, `#1926 <https://github.com/azavea/raster-vision/pull/1926>`__)
+  * Add scripts for building packages and publishing them to PyPi  (`#1915 <https://github.com/azavea/raster-vision/pull/1915>`__)
+  * Add unit tests for ``VsiFileSystem`` (`#1918 <https://github.com/azavea/raster-vision/pull/1918>`__)
+
+----
+
+Raster Vision 0.21.1
+--------------------
+
+* Bug fixes:
+
+  * Chipping: Try hard to return a window, but fail gracefully if not (`#1898 <https://github.com/azavea/raster-vision/pull/1898>`__)
+  * Fix inconsistent handling of RasterSourceConfig.bbox's type (`#1899 <https://github.com/azavea/raster-vision/pull/1899>`__)
+* Refactoring:
+
+  * log.warn -> log.warning (`#1901 <https://github.com/azavea/raster-vision/pull/1901>`__)
+* Dependencies:
+
+  * Bump pycocotools from 2.0.6 to 2.0.7 in /rastervision_pytorch_learner (`#1893 <https://github.com/azavea/raster-vision/pull/1893>`__)
+* Docs:
+
+  * Misc. fixes and improvements (`#1875 <https://github.com/azavea/raster-vision/pull/1875>`__, `#1902 <https://github.com/azavea/raster-vision/pull/1902>`__, `#1903 <https://github.com/azavea/raster-vision/pull/1903>`__, `#1904 <https://github.com/azavea/raster-vision/pull/1904>`__)
+* Docker:
+
+  * Update Docker build to improve caching and image size (`#1866 <https://github.com/azavea/raster-vision/pull/1866>`__, `#1897 <https://github.com/azavea/raster-vision/pull/1897>`__)
+  * Replace miniconda with micromamba in the Docker image (`#1870 <https://github.com/azavea/raster-vision/pull/1870>`__, `#1897 <https://github.com/azavea/raster-vision/pull/1897>`__)
+* CI:
+
+  * Split CI tests into smaller pieces ; prune docker (`#1873 <https://github.com/azavea/raster-vision/pull/1873>`__, `#1874 <https://github.com/azavea/raster-vision/pull/1874>`__)
+
+
+----
+
 Raster Vision 0.21
 ------------------
 
@@ -341,7 +569,7 @@ Raster Vision 0.11
 Features
 ~~~~~~~~
 
-- Added the possibility for chip classification to use data augmentors from the albumentations libary to enhance the training data. `#859 <https://github.com/azavea/raster-vision/pull/859>`__
+- Added the possibility for chip classification to use data augmentors from the albumentations library to enhance the training data. `#859 <https://github.com/azavea/raster-vision/pull/859>`__
 - Updated the Quickstart doc with pytorch docker image and model `#863 <https://github.com/azavea/raster-vision/pull/863>`__
 - Added the possibility to deal with class imbalances through oversampling. `#868 <https://github.com/azavea/raster-vision/pull/868>`__
 

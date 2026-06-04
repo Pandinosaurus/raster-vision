@@ -1,4 +1,5 @@
-from typing import TYPE_CHECKING, Callable, Iterable, List, Optional, Sequence, Union
+from typing import TYPE_CHECKING, Iterable, Sequence
+from collections.abc import Callable
 from enum import Enum
 import logging
 
@@ -7,11 +8,11 @@ from torch import nn
 from torchvision import models
 
 from rastervision.core.data import Scene
+from rastervision.core.rv_pipeline import WindowSamplingMethod
 from rastervision.pipeline.config import (Config, register_config, Field,
                                           ConfigError)
 from rastervision.pytorch_learner.learner_config import (
-    LearnerConfig, ModelConfig, PlotOptions, ImageDataConfig, GeoDataConfig,
-    GeoDataWindowMethod)
+    LearnerConfig, ModelConfig, PlotOptions, ImageDataConfig, GeoDataConfig)
 from rastervision.pytorch_learner.dataset import (
     RegressionImageDataset, RegressionSlidingWindowGeoDataset,
     RegressionRandomWindowGeoDataset)
@@ -45,8 +46,8 @@ def reg_data_config_upgrader(cfg_dict, version):
 
 @register_config('regression_data', upgrader=reg_data_config_upgrader)
 class RegressionDataConfig(Config):
-    pos_class_names: List[str] = []
-    prob_class_names: List[str] = []
+    pos_class_names: list[str] = []
+    prob_class_names: list[str] = []
 
 
 @register_config('regression_image_data')
@@ -54,7 +55,7 @@ class RegressionImageDataConfig(RegressionDataConfig, ImageDataConfig):
     """Configure :class:`RegressionImageDatasets <.RegressionImageDataset>`."""
 
     data_format: RegressionDataFormat = RegressionDataFormat.csv
-    plot_options: Optional[RegressionPlotOptions] = Field(
+    plot_options: RegressionPlotOptions | None = Field(
         RegressionPlotOptions(), description='Options to control plotting.')
 
     def dir_to_dataset(self, data_dir: str,
@@ -71,28 +72,37 @@ class RegressionGeoDataConfig(RegressionDataConfig, GeoDataConfig):
     See :mod:`rastervision.pytorch_learner.dataset.regression_dataset`.
     """
 
-    plot_options: Optional[RegressionPlotOptions] = Field(
+    plot_options: RegressionPlotOptions | None = Field(
         RegressionPlotOptions(), description='Options to control plotting.')
 
-    def scene_to_dataset(self,
-                         scene: Scene,
-                         transform: Optional[A.BasicTransform] = None
-                         ) -> Union[RegressionSlidingWindowGeoDataset,
-                                    RegressionRandomWindowGeoDataset]:
-        if isinstance(self.window_opts, dict):
-            opts = self.window_opts[scene.id]
+    def scene_to_dataset(
+            self,
+            scene: Scene,
+            transform: A.BasicTransform | None = None,
+            for_chipping: bool = False
+    ) -> RegressionSlidingWindowGeoDataset | RegressionRandomWindowGeoDataset:
+        if isinstance(self.sampling, dict):
+            opts = self.sampling[scene.id]
         else:
-            opts = self.window_opts
+            opts = self.sampling
 
-        if opts.method == GeoDataWindowMethod.sliding:
+        extra_args = {}
+        if for_chipping:
+            extra_args = dict(
+                normalize=False, to_pytorch=False, return_window=True)
+
+        if opts.method == WindowSamplingMethod.sliding:
             ds = RegressionSlidingWindowGeoDataset(
                 scene,
                 size=opts.size,
                 stride=opts.stride,
                 padding=opts.padding,
                 pad_direction=opts.pad_direction,
-                transform=transform)
-        elif opts.method == GeoDataWindowMethod.random:
+                within_aoi=opts.within_aoi,
+                transform=transform,
+                **extra_args,
+            )
+        elif opts.method == WindowSamplingMethod.random:
             ds = RegressionRandomWindowGeoDataset(
                 scene,
                 size_lims=opts.size_lims,
@@ -103,7 +113,10 @@ class RegressionGeoDataConfig(RegressionDataConfig, GeoDataConfig):
                 max_windows=opts.max_windows,
                 max_sample_attempts=opts.max_sample_attempts,
                 efficient_aoi_sampling=opts.efficient_aoi_sampling,
-                transform=transform)
+                within_aoi=opts.within_aoi,
+                transform=transform,
+                **extra_args,
+            )
         else:
             raise NotImplementedError()
         return ds
@@ -113,8 +126,8 @@ class RegressionModel(nn.Module):
     def __init__(self,
                  backbone: nn.Module,
                  out_features: int,
-                 pos_out_inds: Optional[Sequence[int]] = None,
-                 prob_out_inds: Optional[Sequence[int]] = None,
+                 pos_out_inds: Sequence[int] | None = None,
+                 prob_out_inds: Sequence[int] | None = None,
                  **kwargs):
         super().__init__()
         self.backbone = backbone
@@ -138,7 +151,7 @@ class RegressionModel(nn.Module):
 class RegressionModelConfig(ModelConfig):
     """Configure a regression model."""
 
-    output_multiplier: List[float] = None
+    output_multiplier: list[float] | None = None
 
     def update(self, learner=None):
         if learner is not None and self.output_multiplier is None:
@@ -148,9 +161,9 @@ class RegressionModelConfig(ModelConfig):
             self,
             num_classes: int,
             in_channels: int,
-            class_names: Optional[Sequence[str]] = None,
-            pos_class_names: Optional[Iterable[str]] = None,
-            prob_class_names: Optional[Iterable[str]] = None) -> nn.Module:
+            class_names: Sequence[str] | None = None,
+            pos_class_names: Iterable[str] | None = None,
+            prob_class_names: Iterable[str] | None = None) -> nn.Module:
         backbone_name = self.get_backbone_str()
         pretrained = self.pretrained
         out_features = num_classes
@@ -204,8 +217,7 @@ class RegressionModelConfig(ModelConfig):
 class RegressionLearnerConfig(LearnerConfig):
     """Configure a :class:`.RegressionLearner`."""
 
-    model: Optional[RegressionModelConfig]
-    data: Union[RegressionImageDataConfig, RegressionGeoDataConfig]
+    model: RegressionModelConfig | None = None
 
     def build(self,
               tmp_dir,

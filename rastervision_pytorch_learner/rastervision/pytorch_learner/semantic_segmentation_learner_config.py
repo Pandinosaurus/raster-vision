@@ -1,4 +1,4 @@
-from typing import Callable, Optional, Union
+from collections.abc import Callable
 from os.path import join
 from enum import Enum
 import logging
@@ -9,11 +9,11 @@ from torch.utils.data import Dataset
 from torchvision import models
 
 from rastervision.core.data import Scene
+from rastervision.core.rv_pipeline import WindowSamplingMethod
 from rastervision.pipeline.config import (Config, register_config, Field,
-                                          validator, ConfigError)
+                                          field_validator, ConfigError)
 from rastervision.pytorch_learner.learner_config import (
-    Backbone, LearnerConfig, ModelConfig, ImageDataConfig, GeoDataConfig,
-    GeoDataWindowMethod)
+    Backbone, LearnerConfig, ModelConfig, ImageDataConfig, GeoDataConfig)
 from rastervision.pytorch_learner.dataset import (
     SemanticSegmentationImageDataset,
     SemanticSegmentationSlidingWindowGeoDataset,
@@ -113,22 +113,30 @@ class SemanticSegmentationGeoDataConfig(SemanticSegmentationDataConfig,
 
     def scene_to_dataset(self,
                          scene: Scene,
-                         transform: Optional[A.BasicTransform] = None
-                         ) -> Dataset:
-        if isinstance(self.window_opts, dict):
-            opts = self.window_opts[scene.id]
+                         transform: A.BasicTransform | None = None,
+                         for_chipping: bool = False) -> Dataset:
+        if isinstance(self.sampling, dict):
+            opts = self.sampling[scene.id]
         else:
-            opts = self.window_opts
+            opts = self.sampling
 
-        if opts.method == GeoDataWindowMethod.sliding:
+        extra_args = {}
+        if for_chipping:
+            extra_args = dict(
+                normalize=False, to_pytorch=False, return_window=True)
+
+        if opts.method == WindowSamplingMethod.sliding:
             ds = SemanticSegmentationSlidingWindowGeoDataset(
                 scene,
                 size=opts.size,
                 stride=opts.stride,
                 padding=opts.padding,
                 pad_direction=opts.pad_direction,
-                transform=transform)
-        elif opts.method == GeoDataWindowMethod.random:
+                within_aoi=opts.within_aoi,
+                transform=transform,
+                **extra_args,
+            )
+        elif opts.method == WindowSamplingMethod.random:
             ds = SemanticSegmentationRandomWindowGeoDataset(
                 scene,
                 size_lims=opts.size_lims,
@@ -139,7 +147,10 @@ class SemanticSegmentationGeoDataConfig(SemanticSegmentationDataConfig,
                 max_windows=opts.max_windows,
                 max_sample_attempts=opts.max_sample_attempts,
                 efficient_aoi_sampling=opts.efficient_aoi_sampling,
-                transform=transform)
+                within_aoi=opts.within_aoi,
+                transform=transform,
+                **extra_args,
+            )
         else:
             raise NotImplementedError()
         return ds
@@ -154,7 +165,8 @@ class SemanticSegmentationModelConfig(ModelConfig):
         description='The torchvision.models backbone to use. Currently, only '
         'resnet50 and resnet101 are supported.')
 
-    @validator('backbone')
+    @field_validator('backbone')
+    @classmethod
     def only_valid_backbones(cls, v):
         if v not in [Backbone.resnet50, Backbone.resnet101]:
             raise ValueError(
@@ -167,8 +179,8 @@ class SemanticSegmentationModelConfig(ModelConfig):
         backbone_name = self.get_backbone_str()
         pretrained = self.pretrained
         weights = 'DEFAULT' if pretrained else None
-        model_factory_func: Callable = getattr(models.segmentation,
-                                               f'deeplabv3_{backbone_name}')
+        model_factory_func: Callable[..., nn.Module] = getattr(
+            models.segmentation, f'deeplabv3_{backbone_name}')
         model = model_factory_func(
             num_classes=num_classes,
             weights_backbone=weights,
@@ -200,9 +212,7 @@ class SemanticSegmentationModelConfig(ModelConfig):
 class SemanticSegmentationLearnerConfig(LearnerConfig):
     """Configure a :class:`.SemanticSegmentationLearner`."""
 
-    data: Union[SemanticSegmentationImageDataConfig,
-                SemanticSegmentationGeoDataConfig]
-    model: Optional[SemanticSegmentationModelConfig]
+    model: SemanticSegmentationModelConfig | None = None
 
     def build(self,
               tmp_dir=None,

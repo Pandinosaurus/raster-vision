@@ -1,5 +1,6 @@
-from typing import TYPE_CHECKING, List, Optional, Sequence, Tuple, Union
+from typing import TYPE_CHECKING, Sequence
 import os
+from os.path import join
 import subprocess
 import logging
 
@@ -8,27 +9,29 @@ import rasterio as rio
 import rasterio.windows as rio_windows
 from rasterio.transform import from_origin
 from rasterio.enums import (ColorInterp, MaskFlags, Resampling)
+from rasterio.session import AWSSession
 
 from rastervision.pipeline.file_system.utils import (
     file_to_json, get_local_path, get_tmp_dir, make_dir, upload_or_copy,
-    download_if_needed)
+    download_if_needed, uri_to_vsi_path)
 from rastervision.core.box import Box
 
 if TYPE_CHECKING:
     from rasterio.io import DatasetReader
+    from rasterio.session import Session
 
 log = logging.getLogger(__name__)
 
 
 def write_window(dataset: 'DatasetReader',
                  arr: np.ndarray,
-                 window: Optional[Box] = None) -> None:
+                 window: Box | None = None) -> None:
     """Write a (H, W[, C]) array out to a rasterio dataset.
 
     Args:
         dataset (DatasetReader): Rasterio dataset, opened for writing.
         arr (np.ndarray): Array to write.
-        window (Optional[Box]): Window (in pixel coords) to write to.
+        window (Box | None): Window (in pixel coords) to write to.
             Defaults to None.
     """
     if window is not None:
@@ -47,7 +50,7 @@ def write_bbox(path: str, arr: np.ndarray, bbox: Box, crs_wkt: str, **kwargs):
     Args:
         path (str): GeoTiff path.
         arr (np.ndarray): (H, W[, C]) Array to write.
-        bbox (Box): Bouding box in map coords to georeference the GeoTiff to.
+        bbox (Box): Bounding box in map coords to georeference the GeoTiff to.
         crs_wkt (str): CRS in WKT format.
     """
     if arr.ndim == 2:
@@ -56,7 +59,7 @@ def write_bbox(path: str, arr: np.ndarray, bbox: Box, crs_wkt: str, **kwargs):
     else:
         h_arr, w_arr, num_channels = arr.shape
     h_bbox, w_bbox = bbox.size
-    resolution = h_bbox / h_arr, w_bbox / w_arr
+    resolution = w_bbox / w_arr, h_bbox / h_arr
     transform = from_origin(bbox.xmin, bbox.ymax, *resolution)
     out_profile = dict(
         driver='GTiff',
@@ -75,7 +78,7 @@ def write_bbox(path: str, arr: np.ndarray, bbox: Box, crs_wkt: str, **kwargs):
 def write_geotiff_like_geojson(path: str,
                                arr: np.ndarray,
                                geojson_path: str,
-                               crs: Optional[str] = None,
+                               crs: str | None = None,
                                **kwargs) -> None:
     """Write array to GeoTIFF, georeferenced to same bbox as the given GeoJSON.
 
@@ -98,7 +101,7 @@ def write_geotiff_like_geojson(path: str,
             crs = 'epsg:4326'
     crs_wkt = pyproj.CRS(crs).to_wkt()
     geoms = unary_union(list(geojson_to_geoms(geojson)))
-    bbox = Box.from_shapely(geoms).normalize()
+    bbox = Box.from_shapely(geoms)
     write_bbox(path, arr, bbox=bbox, crs_wkt=crs_wkt, **kwargs)
 
 
@@ -130,28 +133,30 @@ def crop_geotiff(src_uri: str, window: Box, dst_uri: str):
         upload_or_copy(crop_path, dst_uri)
 
 
-def build_vrt(vrt_path: str, image_uris: List[str]) -> None:
+def build_vrt(vrt_path: str, image_uris: list[str]) -> None:
     """Build a VRT for a set of TIFF files.
 
     Args:
         vrt_path (str): Local path for the VRT to be created.
-        image_uris (List[str]): Image URIs.
+        image_uris (list[str]): Image URIs.
     """
     log.info('Building VRT...')
     cmd = ['gdalbuildvrt', vrt_path]
-    cmd.extend(image_uris)
-    subprocess.run(cmd)
+    image_uris_vsi = [uri_to_vsi_path(uri) for uri in image_uris]
+    cmd.extend(image_uris_vsi)
+    make_dir(vrt_path, use_dirname=True)
+    subprocess.run(cmd, env=os.environ)
 
 
-def download_and_build_vrt(image_uris: List[str],
+def download_and_build_vrt(image_uris: list[str],
                            vrt_dir: str,
                            stream: bool = False) -> str:
     """Download images (if needed) and build a VRT for a set of TIFF files.
 
     Args:
-        image_uris (List[str]): Image URIs.
+        image_uris (list[str]): Image URIs.
         vrt_dir (str): Dir where the VRT will be created.
-        stream (bool, optional): If true, do not download images.
+        stream (bool): If true, do not download images.
             Defaults to False.
 
     Returns:
@@ -159,44 +164,44 @@ def download_and_build_vrt(image_uris: List[str],
     """
     if not stream:
         image_uris = [download_if_needed(uri) for uri in image_uris]
-    vrt_path = os.path.join(vrt_dir, 'index.vrt')
+    vrt_path = join(vrt_dir, 'index.vrt')
     build_vrt(vrt_path, image_uris)
     return vrt_path
 
 
-def read_window(
-        dataset: 'DatasetReader',
-        bands: Optional[Union[int, Sequence[int]]] = None,
-        window: Optional[Tuple[Tuple[int, int], Tuple[int, int]]] = None,
-        is_masked: bool = False,
-        out_shape: Optional[Tuple[int, ...]] = None) -> np.ndarray:
+def read_window(dataset: 'DatasetReader',
+                bands: int | Sequence[int] | None = None,
+                window: tuple[tuple[int, int], tuple[int, int]] | None = None,
+                is_masked: bool = False,
+                out_shape: tuple[int, ...] | None = None,
+                session: 'Session | None' = None) -> np.ndarray:
     """Load a window of an image using Rasterio.
 
     Args:
         dataset: a Rasterio dataset.
-        bands (Optional[Union[int, Sequence[int]]]): Band index or indices to
-            read. Must be 1-indexed.
-        window (Optional[Tuple[Tuple[int, int], Tuple[int, int]]]):
-            ((row_start, row_stop), (col_start, col_stop)) or
-            ((y_min, y_max), (x_min, x_max)). If None, reads the entire raster.
-            Defaults to None.
-        is_masked (bool): If True, read a masked array from rasterio.
-            Defaults to False.
-        out_shape (Optional[Tuple[int, int]]): (hieght, width) of the output
-            chip. If None, no resizing is done. Defaults to None.
+        bands: Band index or indices to read. Must be 1-indexed.
+        window: ``((row_start, row_stop), (col_start, col_stop))`` or
+            ``((y_min, y_max), (x_min, x_max))``. If ``None``, reads the entire
+            raster. Defaults to ``None``.
+        is_masked: If ``True``, read a masked array from rasterio.
+            Defaults to ``False``.
+        out_shape: (height, width) of the output chip. If ``None``, no
+            resizing is done. Defaults to ``None``.
+        session: Rasterio :class:`.Session`.
 
     Returns:
         np.ndarray: array of shape (height, width, channels).
     """
     if bands is not None:
         bands = tuple(bands)
-    im = dataset.read(
-        indexes=bands,
-        window=window,
-        boundless=True,
-        masked=is_masked,
-        out_shape=out_shape,
-        resampling=Resampling.bilinear)
+    with rio.Env(session=session):
+        im = dataset.read(
+            indexes=bands,
+            window=window,
+            boundless=True,
+            masked=is_masked,
+            out_shape=out_shape,
+            resampling=Resampling.bilinear)
 
     if is_masked:
         im = np.ma.filled(im, fill_value=0)
@@ -217,7 +222,7 @@ def read_window(
     return im
 
 
-def get_channel_order_from_dataset(dataset: 'DatasetReader') -> List[int]:
+def get_channel_order_from_dataset(dataset: 'DatasetReader') -> list[int]:
     """Get channel order from rasterio image dataset.
 
     Accounts for dataset's ``colorinterp`` if defined.
@@ -226,7 +231,7 @@ def get_channel_order_from_dataset(dataset: 'DatasetReader') -> List[int]:
         dataset (DatasetReader): Rasterio image dataset.
 
     Returns:
-        List[int]: List of channel indices.
+        list[int]: List of channel indices.
     """
     colorinterp = dataset.colorinterp
     if colorinterp:
@@ -244,3 +249,15 @@ def is_masked(dataset: 'DatasetReader') -> bool:
     mask_flags = dataset.mask_flag_enums
     is_masked = any(m for m in mask_flags if m != MaskFlags.all_valid)
     return is_masked
+
+
+def get_aws_session() -> 'Session':
+    """Build a rasterio AWS session from environment variables."""
+    try:
+        from rastervision.aws_s3 import S3FileSystem
+        requester_pays = S3FileSystem.get_request_payer()
+    except ModuleNotFoundError:
+        requester_pays = os.getenv('AWS_REQUEST_PAYER',
+                                   '').lower() == 'requestor'
+    session = AWSSession.from_environ(requester_pays=requester_pays)
+    return session

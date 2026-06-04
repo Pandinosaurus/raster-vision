@@ -1,23 +1,21 @@
-import logging
+from typing import TYPE_CHECKING
 from os.path import join
+import logging
 import tempfile
 import shutil
-from typing import TYPE_CHECKING, Optional, List
 from functools import lru_cache
 
 import click
 import numpy as np
-from tqdm.auto import tqdm
 
 from rastervision.pipeline.pipeline import Pipeline
 from rastervision.core.box import Box
 from rastervision.core.data_sample import DataSample
 from rastervision.core.data import Scene, Labels
 from rastervision.core.backend import Backend
-from rastervision.core.rv_pipeline import TRAIN, VALIDATION
 from rastervision.pipeline.file_system.utils import (
     download_if_needed, zipdir, get_local_path, upload_or_copy, make_dir,
-    sync_to_dir, file_exists)
+    sync_from_dir, file_exists)
 
 log = logging.getLogger(__name__)
 
@@ -47,7 +45,7 @@ class RVPipeline(Pipeline):
 
     def __init__(self, config: 'RVPipelineConfig', tmp_dir: str):
         super().__init__(config, tmp_dir)
-        self.backend: Optional['Backend'] = None
+        self.backend: 'Backend | None' = None
         self.config: 'RVPipelineConfig'
 
     @property
@@ -95,7 +93,7 @@ class RVPipeline(Pipeline):
                          f'scene group "{group_name}"...')
                 analyzer.process(group_scenes, self.tmp_dir)
 
-    def get_train_windows(self, scene: Scene) -> List[Box]:
+    def get_train_windows(self, scene: Scene) -> list[Box]:
         """Return the training windows for a Scene.
 
         Each training window represents the spatial extent of a training chip to
@@ -117,36 +115,12 @@ class RVPipeline(Pipeline):
     def chip(self, split_ind: int = 0, num_splits: int = 1):
         """Save training and validation chips."""
         cfg = self.config
-        backend = cfg.backend.build(cfg, self.tmp_dir)
+        log.info(f'Chip options: {cfg.chip_options}')
         dataset = cfg.dataset.get_split_config(split_ind, num_splits)
         if not dataset.train_scenes and not dataset.validation_scenes:
             return
-
-        class_cfg = dataset.class_config
-        with backend.get_sample_writer() as writer:
-
-            def chip_scene(scene, split):
-                windows = self.get_train_windows(scene)
-                with tqdm(
-                        windows,
-                        desc=f'Making {split} chips from scene {scene.id}',
-                        mininterval=0.5) as bar:
-                    for window in bar:
-                        chip = scene.raster_source.get_chip(window)
-                        labels = self.get_train_labels(window, scene)
-                        sample = DataSample(
-                            chip=chip,
-                            window=window,
-                            labels=labels,
-                            scene_id=str(scene.id),
-                            is_train=split == TRAIN)
-                        sample = self.post_process_sample(sample)
-                        writer.write_sample(sample)
-
-            for s in dataset.train_scenes:
-                chip_scene(s.build(class_cfg, self.tmp_dir), TRAIN)
-            for s in dataset.validation_scenes:
-                chip_scene(s.build(class_cfg, self.tmp_dir), VALIDATION)
+        backend = cfg.backend.build(cfg, self.tmp_dir)
+        backend.chip_dataset(dataset, cfg.chip_options)
 
     def train(self):
         """Train a model and save it."""
@@ -160,7 +134,7 @@ class RVPipeline(Pipeline):
         """
         return sample
 
-    def post_process_batch(self, windows: List[Box], chips: np.ndarray,
+    def post_process_batch(self, windows: list[Box], chips: np.ndarray,
                            labels: Labels) -> Labels:
         """Post-process a batch of predictions."""
         return labels
@@ -174,25 +148,24 @@ class RVPipeline(Pipeline):
 
         This uses a sliding window.
         """
-        # Cache backend so subsquent calls will be faster. This is useful for
-        # the predictor.
         if self.backend is None:
-            self.backend = self.config.backend.build(self.config, self.tmp_dir)
-            self.backend.load_model()
+            self.build_backend()
 
         class_config = self.config.dataset.class_config
         dataset = self.config.dataset.get_split_config(split_ind, num_splits)
 
         for scene_config in (dataset.validation_scenes + dataset.test_scenes):
             scene = scene_config.build(class_config, self.tmp_dir)
-            labels = self.predict_scene(scene, self.backend)
-            labels = self.post_process_predictions(labels, scene)
+            labels = self.predict_scene(scene)
             scene.label_store.save(labels)
 
-    def predict_scene(self, scene: Scene, backend: Backend) -> Labels:
-        chip_sz = self.config.predict_chip_sz
-        stride = chip_sz
-        return backend.predict_scene(scene, chip_sz=chip_sz, stride=stride)
+    def predict_scene(self, scene: Scene) -> Labels:
+        if self.backend is None:
+            self.build_backend()
+        labels = self.backend.predict_scene(
+            scene, predict_options=self.config.predict_options)
+        labels = self.post_process_predictions(labels, scene)
+        return labels
 
     def eval(self):
         """Evaluate predictions against ground truth."""
@@ -229,9 +202,9 @@ class RVPipeline(Pipeline):
                 try:
                     evaluator.process(group_scenes, self.tmp_dir)
                 except FileNotFoundError:
-                    log.warn(f'Skipping scene group "{group_name}". '
-                             'Either labels or predictions are missing for '
-                             'some scene.')
+                    log.warning(f'Skipping scene group "{group_name}". '
+                                'Either labels or predictions are missing for '
+                                'some scene.')
 
     def bundle(self):
         """Save a model bundle with whatever is needed to make predictions.
@@ -249,8 +222,8 @@ class RVPipeline(Pipeline):
                 shutil.copy(path, join(bundle_dir, fn))
 
             if file_exists(self.config.analyze_uri, include_dir=True):
-                sync_to_dir(self.config.analyze_uri, join(
-                    bundle_dir, 'analyze'))
+                analyze_dst = join(bundle_dir, 'analyze')
+                sync_from_dir(self.config.analyze_uri, analyze_dst)
 
             path = download_if_needed(self.config.get_config_uri(), tmp_dir)
             shutil.copy(path, join(bundle_dir, 'pipeline-config.json'))
@@ -259,3 +232,7 @@ class RVPipeline(Pipeline):
             model_bundle_path = get_local_path(model_bundle_uri, self.tmp_dir)
             zipdir(bundle_dir, model_bundle_path)
             upload_or_copy(model_bundle_path, model_bundle_uri)
+
+    def build_backend(self, uri: str | None = None) -> None:
+        self.backend = self.config.backend.build(self.config, self.tmp_dir)
+        self.backend.load_model(uri)

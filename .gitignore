@@ -101,6 +101,9 @@ deployment/ansible/*.retry
 *.tfstate
 *.tfstate.backup
 
+# Apple filesystem
+.DS*
+
 # Emacs
 \#*#
 *~
@@ -120,8 +123,6 @@ deployment/ansible/*.retry
 /notebooks/*
 !/notebooks/**/*.ipynb
 
-docs/**/tutorials/*
-!docs/**/tutorials/**/*.ipynb
-!docs/**/tutorials/**/*.py
-!docs/**/tutorials/**/*.rst
-!docs/**/tutorials/**/*.md
+docs/**/tutorials/**/data
+docs/**/tutorials/**/.ipynb_checkpoints/
+docs/**/tutorials/**/.*/

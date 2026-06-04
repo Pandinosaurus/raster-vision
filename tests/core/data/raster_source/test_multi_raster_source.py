@@ -1,8 +1,9 @@
-from typing import Callable
+from collections.abc import Callable
 import unittest
 
 import numpy as np
 from xarray import DataArray
+from pystac import Item
 
 from rastervision.pipeline.file_system import get_tmp_dir
 from rastervision.core.box import Box
@@ -10,6 +11,8 @@ from rastervision.core.data import (
     RasterioSourceConfig, MultiRasterSource, MultiRasterSourceConfig,
     ReclassTransformerConfig, CastTransformerConfig, XarraySource,
     IdentityCRSTransformer, TemporalMultiRasterSource)
+from rastervision.core.data.raster_source.multi_raster_source_config import (
+    multi_rs_config_upgrader)
 
 from tests import data_file_path
 
@@ -71,14 +74,32 @@ class TestMultiRasterSourceConfig(unittest.TestCase):
         cfg = make_cfg()
         self.assertNoError(lambda: cfg.build(tmp_dir=get_tmp_dir()))
 
+    def test_build_with_bbox(self):
+        cfg = make_cfg(bbox=(0, 0, 1, 1))
+        rs = cfg.build(tmp_dir=get_tmp_dir())
+        self.assertEqual(rs.bbox, Box(0, 0, 1, 1))
+
     def test_build_temporal(self):
         cfg = make_cfg(temporal=True)
         rs = cfg.build(tmp_dir=get_tmp_dir())
         self.assertIsInstance(rs, TemporalMultiRasterSource)
         self.assertEqual(rs.shape, (3, 256, 256, 3))
 
+    def test_upgrader_v14(self):
+        cfg = make_cfg()
+        cfg_dict_old = cfg.dict()
+        cfg_dict_old['force_same_dtype'] = True
+        cfg_dict_new = multi_rs_config_upgrader(cfg_dict_old, 13)
+        self.assertNotIn('force_same_dtype', cfg_dict_new)
+
 
 class TestMultiRasterSource(unittest.TestCase):
+    def assertNoError(self, fn: Callable, msg: str = ''):
+        try:
+            fn()
+        except Exception:
+            self.fail(msg)
+
     def setUp(self):
         self.tmp_dir_obj = get_tmp_dir()
         self.tmp_dir = self.tmp_dir_obj.name
@@ -101,25 +122,19 @@ class TestMultiRasterSource(unittest.TestCase):
 
     def test_primary_source_idx(self):
         primary_source_idx = 2
-        non_primary_source_idx = 1
 
-        cfg = make_cfg_diverse(
-            diff_dtypes=True,
-            force_same_dtype=True,
-            primary_source_idx=primary_source_idx)
+        cfg = make_cfg_diverse(primary_source_idx=primary_source_idx)
         rs = cfg.build(tmp_dir=self.tmp_dir)
         primary_rs = rs.raster_sources[primary_source_idx]
-        non_primary_rs = rs.raster_sources[non_primary_source_idx]
 
         self.assertEqual(rs.extent, primary_rs.extent)
-        self.assertNotEqual(rs.extent, non_primary_rs.extent)
-
         self.assertEqual(rs.dtype, primary_rs.dtype)
-        self.assertNotEqual(rs.dtype, non_primary_rs.dtype)
-
         self.assertEqual(rs.crs_transformer.transform,
                          primary_rs.crs_transformer.transform)
-        self.assertNotEqual(rs.crs_transformer, non_primary_rs.crs_transformer)
+
+    def test_dtype_validation(self):
+        cfg = make_cfg_diverse(diff_dtypes=True)
+        self.assertRaises(ValueError, lambda: cfg.build(tmp_dir=self.tmp_dir))
 
     def test_bbox(self):
         # /wo user specified extent
@@ -127,10 +142,6 @@ class TestMultiRasterSource(unittest.TestCase):
         rs = cfg.build(tmp_dir=self.tmp_dir)
         self.assertEqual(rs.bbox, Box(0, 0, 256, 256))
         self.assertEqual(rs.extent, Box(0, 0, 256, 256))
-
-        # test validators
-        cfg = make_cfg('small-rgb-tile.tif', bbox=(64, 64, 192, 192))
-        self.assertIsInstance(cfg.bbox, Box)
 
         # /w user specified extent
         cfg_crop = make_cfg('small-rgb-tile.tif', bbox=(64, 64, 192, 192))
@@ -170,18 +181,13 @@ class TestMultiRasterSource(unittest.TestCase):
         window = Box(0, 0, 100, 100)
 
         # sub transformers and channel_order applied
-        sub_chips = rs._get_sub_chips(window, raw=False)
-        self.assertEqual(tuple(c.mean() for c in sub_chips), (100, 175, 250))
+        chip = rs._get_chip(window)
+        self.assertEqual(
+            tuple(chip.reshape(-1, 3).mean(axis=0)), (100, 175, 250))
+
         # sub transformers, channel_order, and transformer applied
         chip = rs.get_chip(window)
         self.assertEqual(tuple(chip.reshape(-1, 3).mean(axis=0)), (25, 17, 10))
-
-        # none of sub transformers, channel_order, and transformer applied
-        sub_chips = rs._get_sub_chips(window, raw=True)
-        self.assertEqual(tuple(c.mean() for c in sub_chips), (100, 100, 100))
-        chip = rs._get_chip(window)
-        self.assertEqual(
-            tuple(chip.reshape(-1, 3).mean(axis=0)), (100, 100, 100))
 
     def test_nonidentical_extents_and_resolutions(self):
         cfg = make_cfg_diverse(diff_dtypes=False)
@@ -221,6 +227,40 @@ class TestMultiRasterSource(unittest.TestCase):
         chip_expected[..., :4] *= np.arange(4, dtype=np.uint8)
         chip_expected[..., 4:] *= np.arange(4, dtype=np.uint8)
         np.testing.assert_array_equal(chip, chip_expected)
+
+    def test_from_stac(self):
+        item = Item.from_file(data_file_path('stac/item.json'))
+
+        # avoid reading actual remote files
+        mock_raster_uri = data_file_path('ones.tif')
+        item.assets['red'].__setattr__('href', mock_raster_uri)
+        item.assets['green'].__setattr__('href', mock_raster_uri)
+
+        # test bbox
+        bbox = Box(ymin=0, xmin=0, ymax=100, xmax=100)
+        rs = MultiRasterSource.from_stac(
+            item, assets=['red', 'green'], bbox=bbox)
+        self.assertEqual(rs.bbox, bbox)
+
+        # test bbox_map_coords
+        bbox_map_coords = Box(
+            ymin=29.977309,
+            xmin=31.134949,
+            ymax=29.978710,
+            xmax=31.136567,
+        )
+        rs = MultiRasterSource.from_stac(
+            item, assets=['red', 'green'], bbox_map_coords=bbox_map_coords)
+        self.assertEqual(rs.bbox, Box(ymin=51, xmin=50, ymax=207, xmax=206))
+
+        # test error if both bbox and bbox_map_coords specified
+        args = dict(
+            item=item,
+            assets=['red', 'green'],
+            bbox=bbox,
+            bbox_map_coords=bbox_map_coords)
+        self.assertRaises(ValueError,
+                          lambda: MultiRasterSource.from_stac(**args))
 
 
 if __name__ == '__main__':

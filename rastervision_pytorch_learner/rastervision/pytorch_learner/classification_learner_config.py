@@ -1,4 +1,5 @@
-from typing import Callable, Optional, Union
+from typing import TYPE_CHECKING, Iterable
+from collections.abc import Callable
 from enum import Enum
 import logging
 
@@ -6,14 +7,17 @@ import albumentations as A
 from torch import nn
 
 from rastervision.core.data import Scene
+from rastervision.core.rv_pipeline import WindowSamplingMethod
 from rastervision.pipeline.config import (Config, register_config, ConfigError)
 from rastervision.pytorch_learner.learner_config import (
-    LearnerConfig, ModelConfig, ImageDataConfig, GeoDataConfig,
-    GeoDataWindowMethod)
+    LearnerConfig, ModelConfig, ImageDataConfig, GeoDataConfig)
 from rastervision.pytorch_learner.dataset import (
     ClassificationImageDataset, ClassificationSlidingWindowGeoDataset,
     ClassificationRandomWindowGeoDataset)
 from rastervision.pytorch_learner.utils import adjust_conv_channels
+
+if TYPE_CHECKING:
+    from rastervision.core.data import SceneConfig
 
 log = logging.getLogger(__name__)
 
@@ -53,31 +57,42 @@ class ClassificationGeoDataConfig(ClassificationDataConfig, GeoDataConfig):
     See :mod:`rastervision.pytorch_learner.dataset.classification_dataset`.
     """
 
-    def build_scenes(self, tmp_dir: str):
-        for s in self.scene_dataset.all_scenes:
+    def build_scenes(self,
+                     scene_configs: Iterable['SceneConfig'],
+                     tmp_dir: str | None = None):
+        for s in scene_configs:
             if s.label_source is not None:
                 s.label_source.lazy = True
-        return super().build_scenes(tmp_dir=tmp_dir)
+        return super().build_scenes(scene_configs, tmp_dir=tmp_dir)
 
-    def scene_to_dataset(self,
-                         scene: Scene,
-                         transform: Optional[A.BasicTransform] = None
-                         ) -> Union[ClassificationSlidingWindowGeoDataset,
-                                    ClassificationRandomWindowGeoDataset]:
-        if isinstance(self.window_opts, dict):
-            opts = self.window_opts[scene.id]
+    def scene_to_dataset(
+            self,
+            scene: Scene,
+            transform: A.BasicTransform | None = None,
+            for_chipping: bool = False
+    ) -> ClassificationSlidingWindowGeoDataset | ClassificationRandomWindowGeoDataset:
+        if isinstance(self.sampling, dict):
+            opts = self.sampling[scene.id]
         else:
-            opts = self.window_opts
+            opts = self.sampling
 
-        if opts.method == GeoDataWindowMethod.sliding:
+        extra_args = {}
+        if for_chipping:
+            extra_args = dict(
+                normalize=False, to_pytorch=False, return_window=True)
+
+        if opts.method == WindowSamplingMethod.sliding:
             ds = ClassificationSlidingWindowGeoDataset(
                 scene,
                 size=opts.size,
                 stride=opts.stride,
                 padding=opts.padding,
                 pad_direction=opts.pad_direction,
-                transform=transform)
-        elif opts.method == GeoDataWindowMethod.random:
+                within_aoi=opts.within_aoi,
+                transform=transform,
+                **extra_args,
+            )
+        elif opts.method == WindowSamplingMethod.random:
             ds = ClassificationRandomWindowGeoDataset(
                 scene,
                 size_lims=opts.size_lims,
@@ -88,7 +103,10 @@ class ClassificationGeoDataConfig(ClassificationDataConfig, GeoDataConfig):
                 max_windows=opts.max_windows,
                 max_sample_attempts=opts.max_sample_attempts,
                 efficient_aoi_sampling=opts.efficient_aoi_sampling,
-                transform=transform)
+                within_aoi=opts.within_aoi,
+                transform=transform,
+                **extra_args,
+            )
         else:
             raise NotImplementedError()
         return ds
@@ -138,8 +156,7 @@ class ClassificationModelConfig(ModelConfig):
 class ClassificationLearnerConfig(LearnerConfig):
     """Configure a :class:`.ClassificationLearner`."""
 
-    data: Union[ClassificationImageDataConfig, ClassificationGeoDataConfig]
-    model: Optional[ClassificationModelConfig]
+    model: ClassificationModelConfig | None = None
 
     def build(self,
               tmp_dir=None,

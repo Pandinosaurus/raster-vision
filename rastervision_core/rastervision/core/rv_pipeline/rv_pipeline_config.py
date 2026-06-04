@@ -1,27 +1,62 @@
+from typing import TYPE_CHECKING
 from os.path import join
-from typing import List, TYPE_CHECKING, Optional
 
 from rastervision.pipeline.pipeline_config import PipelineConfig
 from rastervision.core.data import (DatasetConfig, StatsTransformerConfig,
                                     LabelStoreConfig, SceneConfig)
-from rastervision.core.utils.misc import Proportion
 from rastervision.core.analyzer import StatsAnalyzerConfig
 from rastervision.core.backend import BackendConfig
 from rastervision.core.evaluation import EvaluatorConfig
 from rastervision.core.analyzer import AnalyzerConfig
-from rastervision.pipeline.config import (register_config, Field, Config)
+from rastervision.core.rv_pipeline.chip_options import ChipOptions
+from rastervision.pipeline.config import (Config, Field, register_config,
+                                          model_validator)
 
 if TYPE_CHECKING:
+    from typing import Self
     from rastervision.core.backend.backend import Backend  # noqa
 
 
 @register_config('predict_options')
 class PredictOptions(Config):
-    # TODO: predict_chip_sz and predict_batch_sz should probably be moved here
-    pass
+    chip_sz: int = Field(
+        300, description='Size of predictions chips in pixels.')
+    stride: int | None = Field(
+        None,
+        description='Stride of the sliding window for generating chips.'
+        'Defaults to ``chip_sz``.')
+    batch_sz: int = Field(
+        8, description='Batch size to use during prediction.')
+
+    @model_validator(mode='after')
+    def validate_stride(self) -> 'Self':
+        if self.stride is None:
+            self.stride = self.chip_sz
+        return self
 
 
-@register_config('rv_pipeline')
+def rv_pipeline_config_upgrader(cfg_dict: dict, version: int) -> dict:
+    if version == 10:
+        train_chip_sz = cfg_dict.pop('train_chip_sz', 300)
+        nodata_threshold = cfg_dict.pop('chip_nodata_threshold', 1.)
+        chip_options: dict = cfg_dict.get('chip_options', {})
+        method = chip_options.pop('method', 'sliding')
+        if method != 'sliding':
+            method = 'random'
+        chip_options['sampling'] = dict(size=train_chip_sz, method=method)
+        chip_options['nodata_threshold'] = nodata_threshold
+        cfg_dict['chip_options'] = chip_options
+    elif version == 11:
+        predict_chip_sz = cfg_dict.pop('predict_chip_sz', 300)
+        predict_batch_sz = cfg_dict.pop('predict_batch_sz', 8)
+        predict_options = cfg_dict.get('predict_options', {})
+        predict_options['chip_sz'] = predict_chip_sz
+        predict_options['batch_sz'] = predict_batch_sz
+        cfg_dict['predict_options'] = predict_options
+    return cfg_dict
+
+
+@register_config('rv_pipeline', upgrader=rv_pipeline_config_upgrader)
 class RVPipelineConfig(PipelineConfig):
     """Configure an :class:`.RVPipeline`."""
 
@@ -31,56 +66,48 @@ class RVPipelineConfig(PipelineConfig):
         'Dataset containing train, validation, and optional test scenes.')
     backend: BackendConfig = Field(
         ..., description='Backend to use for interfacing with ML library.')
-    evaluators: List[EvaluatorConfig] = Field(
+    evaluators: list[EvaluatorConfig] = Field(
         [],
         description=(
             'Evaluators to run during analyzer command. If list is empty '
             'the default evaluator is added.'))
-    analyzers: List[AnalyzerConfig] = Field(
+    analyzers: list[AnalyzerConfig] = Field(
         [],
         description=
         ('Analyzers to run during analyzer command. A StatsAnalyzer will be added '
          'automatically if any scenes have a RasterTransformer.'))
 
-    train_chip_sz: int = Field(
-        300, description='Size of training chips in pixels.')
-    predict_chip_sz: int = Field(
-        300, description='Size of predictions chips in pixels.')
-    predict_batch_sz: int = Field(
-        8, description='Batch size to use during prediction.')
-    chip_nodata_threshold: Proportion = Field(
-        1,
-        description='Discard chips where the proportion of NODATA values is '
-        'greater than or equal to this value. Might result in false positives '
-        'if there are many legitimate black pixels in the chip. Use with '
-        'caution.')
-
-    analyze_uri: Optional[str] = Field(
+    analyze_uri: str | None = Field(
         None,
         description=
         'URI for output of analyze. If None, will be auto-generated.')
-    chip_uri: Optional[str] = Field(
+    chip_uri: str | None = Field(
         None,
         description='URI for output of chip. If None, will be auto-generated.')
-    train_uri: Optional[str] = Field(
+    train_uri: str | None = Field(
         None,
         description='URI for output of train. If None, will be auto-generated.'
     )
-    predict_uri: Optional[str] = Field(
+    predict_uri: str | None = Field(
         None,
         description=
         'URI for output of predict. If None, will be auto-generated.')
-    eval_uri: Optional[str] = Field(
+    eval_uri: str | None = Field(
         None,
         description='URI for output of eval. If None, will be auto-generated.')
-    bundle_uri: Optional[str] = Field(
+    bundle_uri: str | None = Field(
         None,
         description='URI for output of bundle. If None, will be auto-generated.'
     )
-    source_bundle_uri: Optional[str] = Field(
+    source_bundle_uri: str | None = Field(
         None,
         description='If provided, the model will be loaded from this bundle '
         'for the train stage. Useful for fine-tuning.')
+
+    chip_options: ChipOptions | None = Field(
+        None, description='Config for chip stage.')
+    predict_options: PredictOptions | None = Field(
+        None, description='Config for predict stage.')
 
     def update(self):
         super().update()

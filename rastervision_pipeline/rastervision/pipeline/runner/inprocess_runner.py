@@ -23,3 +23,7 @@ class InProcessRunner(Runner):
                     _run_command(cfg_json_uri, command, split_ind, num_splits)
             else:
                 _run_command(cfg_json_uri, command, 0, 1)
+
+    def run_command(self, cmd: list[str]):
+        raise NotImplementedError(
+            'Use LocalRunner.run_command to run a command locally.')

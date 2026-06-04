@@ -1,9 +1,9 @@
 from functools import partial
-from typing import Tuple, Union
 
 from rastervision.core.rv_pipeline import (
     SceneConfig, DatasetConfig, SemanticSegmentationChipOptions,
-    SemanticSegmentationWindowMethod, SemanticSegmentationConfig)
+    SemanticSegmentationConfig, SemanticSegmentationPredictOptions,
+    WindowSamplingConfig, WindowSamplingMethod)
 
 from rastervision.core.data import (
     ClassConfig, RasterioSourceConfig, MultiRasterSourceConfig,
@@ -16,8 +16,7 @@ from rastervision.pytorch_backend import (PyTorchSemanticSegmentationConfig,
 from rastervision.pytorch_backend.examples.utils import (save_image_crop)
 from rastervision.pytorch_learner import (
     Backbone, SolverConfig, SemanticSegmentationImageDataConfig,
-    SemanticSegmentationGeoDataConfig, GeoDataWindowConfig,
-    GeoDataWindowMethod, PlotOptions)
+    SemanticSegmentationGeoDataConfig, PlotOptions)
 
 # -----------------------
 # Input files and paths
@@ -84,24 +83,23 @@ def get_config(runner,
     by RV, with arguments from the command line, when this example is run.
 
     Args:
-        runner (Runner): Runner for the pipeline.
-        raw_uri (str): Directory where the raw data resides
-        processed_uri (str): Directory for storing processed data.
+        runner: Runner for the pipeline.
+        raw_uri: Directory where the raw data resides
+        processed_uri: Directory for storing processed data.
                              E.g. crops for testing.
-        root_uri (str): Directory where all the output will be written.
-        nochip (bool, optional): If True, read directly from the TIFF during
+        root_uri: Directory where all the output will be written.
+        nochip: If True, read directly from the TIFF during
             training instead of from pre-generated chips. The analyze and chip
             commands should not be run, if this is set to True. Defaults to
             True.
-        test (bool, optional): If True, does the following simplifications:
+        test: If True, does the following simplifications:
             (1) Uses only the first 2 scenes
             (2) Uses only a 600x600 crop of the scenes
-            (3) Enables test mode in the learner, which makes it use the
-                test_batch_sz and test_num_epochs, among other things.
+            (3) Trains for only 2 epochs and uses a batch size of 2.
             Defaults to False.
 
     Returns:
-        SemanticSegmentationConfig: A pipeline config.
+        A pipeline config.
     """
     if not test:
         train_ids, val_ids = TRAIN_IDS, VAL_IDS
@@ -125,18 +123,15 @@ def get_config(runner,
         validation_scenes=[_make_scene(scene_id) for scene_id in val_ids])
 
     chip_options = SemanticSegmentationChipOptions(
-        window_method=SemanticSegmentationWindowMethod.sliding,
-        stride=CHIP_SIZE)
+        sampling=WindowSamplingConfig(
+            method=WindowSamplingMethod.sliding,
+            size=CHIP_SIZE,
+            stride=CHIP_SIZE))
 
     if nochip:
-        window_opts = GeoDataWindowConfig(
-            method=GeoDataWindowMethod.sliding,
-            size=CHIP_SIZE,
-            stride=chip_options.stride)
-
         data = SemanticSegmentationGeoDataConfig(
             scene_dataset=dataset_config,
-            window_opts=window_opts,
+            sampling=chip_options.sampling,
             img_sz=CHIP_SIZE,
             num_workers=4,
             plot_options=PlotOptions(
@@ -153,13 +148,10 @@ def get_config(runner,
     # --------------------------------------------
     model_config = SemanticSegmentationModelConfig(backbone=Backbone.resnet50)
 
+    num_epochs = NUM_EPOCHS if not test else TEST_MODE_NUM_EPOCHS
+    batch_sz = BATCH_SIZE if not test else TEST_MODE_BATCH_SIZE
     solver_config = SolverConfig(
-        lr=LR,
-        num_epochs=NUM_EPOCHS,
-        batch_sz=BATCH_SIZE,
-        test_num_epochs=TEST_MODE_NUM_EPOCHS,
-        test_batch_sz=TEST_MODE_BATCH_SIZE,
-        one_cycle=ONE_CYCLE)
+        lr=LR, num_epochs=num_epochs, batch_sz=batch_sz, one_cycle=ONE_CYCLE)
 
     backend_config = PyTorchSemanticSegmentationConfig(
         data=data,
@@ -167,18 +159,19 @@ def get_config(runner,
         solver=solver_config,
         log_tensorboard=LOG_TENSORBOARD,
         run_tensorboard=RUN_TENSORBOARD,
-        test_mode=test)
+    )
+
+    predict_options = SemanticSegmentationPredictOptions(chip_sz=CHIP_SIZE)
 
     # -----------------------------------------------
     # Pass configurations to the pipeline config
     # -----------------------------------------------
     pipeline_config = SemanticSegmentationConfig(
         root_uri=root_uri,
-        train_chip_sz=CHIP_SIZE,
-        predict_chip_sz=CHIP_SIZE,
-        chip_options=chip_options,
         dataset=dataset_config,
-        backend=backend_config)
+        backend=backend_config,
+        chip_options=chip_options,
+        predict_options=predict_options)
 
     return pipeline_config
 
@@ -243,8 +236,8 @@ def make_scene(raw_uri: UriPath,
 
 
 def make_multi_raster_source(
-        rgbir_raster_uri: Union[UriPath, str],
-        elevation_raster_uri: Union[UriPath, str]) -> MultiRasterSourceConfig:
+        rgbir_raster_uri: UriPath | str,
+        elevation_raster_uri: UriPath | str) -> MultiRasterSourceConfig:
     """ Create multi raster source by combining rgbir and elevation sources. """
     rgbir_raster_uri = str(rgbir_raster_uri)
     elevation_raster_uri = str(elevation_raster_uri)
@@ -263,7 +256,7 @@ def make_multi_raster_source(
 
 def make_crop(processed_uri: UriPath,
               raster_uri: UriPath,
-              label_uri: UriPath = None) -> Tuple[UriPath, UriPath]:
+              label_uri: UriPath | None = None) -> tuple[UriPath, UriPath]:
     crop_uri = processed_uri / TEST_CROP_DIR / raster_uri.name
     if label_uri is not None:
         label_crop_uri = processed_uri / TEST_CROP_DIR / label_uri.name
@@ -281,8 +274,8 @@ def make_crop(processed_uri: UriPath,
     return crop_uri, label_crop_uri
 
 
-def make_label_source(class_config: ClassConfig, label_uri: Union[UriPath, str]
-                      ) -> Tuple[SemanticSegmentationLabelSourceConfig,
+def make_label_source(class_config: ClassConfig, label_uri: UriPath | str
+                      ) -> tuple[SemanticSegmentationLabelSourceConfig,
                                  SemanticSegmentationLabelStoreConfig]:
     label_uri = str(label_uri)
     # Using with_rgb_class_map because label TIFFs have classes encoded as

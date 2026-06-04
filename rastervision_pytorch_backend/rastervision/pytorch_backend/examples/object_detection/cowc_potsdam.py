@@ -1,14 +1,19 @@
-# flake8: noqa
-
 import os
 from os.path import join
 
-from rastervision.core.rv_pipeline import *
-from rastervision.core.backend import *
-from rastervision.core.data import *
-from rastervision.core.analyzer import *
-from rastervision.pytorch_backend import *
-from rastervision.pytorch_learner import *
+from rastervision.core.rv_pipeline import (
+    ObjectDetectionConfig, ObjectDetectionChipOptions,
+    ObjectDetectionPredictOptions, WindowSamplingMethod,
+    ObjectDetectionWindowSamplingConfig)
+from rastervision.core.data import (
+    ClassConfig, ClassInferenceTransformerConfig, DatasetConfig,
+    GeoJSONVectorSourceConfig, ObjectDetectionLabelSourceConfig,
+    RasterioSourceConfig, SceneConfig)
+from rastervision.pytorch_backend import PyTorchObjectDetectionConfig
+from rastervision.pytorch_learner import (
+    Backbone, ExternalModuleConfig, ObjectDetectionGeoDataConfig,
+    ObjectDetectionImageDataConfig, ObjectDetectionModelConfig, PlotOptions,
+    SolverConfig)
 from rastervision.pytorch_backend.examples.utils import save_image_crop
 
 TRAIN_IDS = [
@@ -35,20 +40,19 @@ def get_config(runner,
         processed_uri (str): Directory for storing processed data.
                              E.g. crops for testing.
         root_uri (str): Directory where all the output will be written.
-        nochip (bool, optional): If True, read directly from the TIFF during
+        nochip (bool): If True, read directly from the TIFF during
             training instead of from pre-generated chips. The analyze and chip
             commands should not be run, if this is set to True. Defaults to
             False.
-        multiband (bool, optional): If True, all 4 channels (R, G, B, & IR)
+        multiband (bool): If True, all 4 channels (R, G, B, & IR)
             available in the raster source will be used. If False, only
             IR, R, G (in that order) will be used. Defaults to False.
-        external_model (bool, optional): If True, use an external model defined
+        external_model (bool): If True, use an external model defined
             by the ExternalModuleConfig. Defaults to True.
-        test (bool, optional): If True, does the following simplifications:
+        test (bool): If True, does the following simplifications:
             (1) Uses only the first 2 scenes
             (2) Uses only a 2000x2000 crop of the scenes
-            (3) Enables test mode in the learner, which makes it use the
-                test_batch_sz and test_num_epochs, among other things.
+            (3) Trains for only 2 epochs.
             Defaults to False.
 
     Returns:
@@ -57,9 +61,14 @@ def get_config(runner,
     train_ids = TRAIN_IDS
     val_ids = VAL_IDS
 
+    chip_sz = 300
+    img_sz = chip_sz
+    chips_per_scene = 100
+
     if test:
         train_ids = train_ids[:2]
         val_ids = val_ids[:2]
+        chips_per_scene = 10
 
     if multiband:
         channel_order = [0, 1, 2, 3]
@@ -91,7 +100,6 @@ def get_config(runner,
 
         vector_source = GeoJSONVectorSourceConfig(
             uris=label_uri,
-            ignore_crs_field=True,
             transformers=[ClassInferenceTransformerConfig(default_class_id=0)])
         label_source = ObjectDetectionLabelSourceConfig(
             vector_source=vector_source)
@@ -105,25 +113,22 @@ def get_config(runner,
         train_scenes=[make_scene(id) for id in train_ids],
         validation_scenes=[make_scene(id) for id in val_ids])
 
-    chip_sz = 300
-    img_sz = chip_sz
+    window_sampling_opts = ObjectDetectionWindowSamplingConfig(
+        method=WindowSamplingMethod.random,
+        size=chip_sz,
+        size_lims=(chip_sz, chip_sz + 1),
+        max_windows=chips_per_scene,
+        max_sample_attempts=100,
+        clip=True,
+        neg_ratio=5.0,
+        ioa_thresh=0.9,
+        neg_ioa_thresh=0.2)
 
-    chip_options = ObjectDetectionChipOptions(neg_ratio=5.0, ioa_thresh=0.9)
+    chip_options = ObjectDetectionChipOptions(sampling=window_sampling_opts)
     if nochip:
-        window_opts = ObjectDetectionGeoDataWindowConfig(
-            method=GeoDataWindowMethod.random,
-            size=chip_sz,
-            size_lims=(chip_sz, chip_sz + 1),
-            max_windows=500,
-            max_sample_attempts=100,
-            clip=True,
-            neg_ratio=chip_options.neg_ratio,
-            ioa_thresh=chip_options.ioa_thresh,
-            neg_ioa_thresh=0.2)
-
         data = ObjectDetectionGeoDataConfig(
             scene_dataset=scene_dataset,
-            window_opts=window_opts,
+            sampling=window_sampling_opts,
             img_sz=img_sz,
             num_workers=4,
             plot_options=PlotOptions(
@@ -181,23 +186,21 @@ def get_config(runner,
         model=model,
         solver=SolverConfig(
             lr=1e-4,
-            num_epochs=10,
-            test_num_epochs=2,
+            num_epochs=10 if not test else 2,
             batch_sz=16,
-            one_cycle=True),
+            one_cycle=True,
+        ),
         log_tensorboard=False,
         run_tensorboard=False,
-        test_mode=test)
+    )
 
     predict_options = ObjectDetectionPredictOptions(
-        merge_thresh=0.5, score_thresh=0.9)
+        chip_sz=chip_sz, merge_thresh=0.5, score_thresh=0.9)
 
     pipeline = ObjectDetectionConfig(
         root_uri=root_uri,
         dataset=scene_dataset,
         backend=backend,
-        train_chip_sz=chip_sz,
-        predict_chip_sz=chip_sz,
         chip_options=chip_options,
         predict_options=predict_options)
 

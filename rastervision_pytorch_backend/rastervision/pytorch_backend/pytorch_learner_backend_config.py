@@ -1,4 +1,3 @@
-from typing import Optional, List
 import logging
 
 from rastervision.pipeline.config import (register_config, Field)
@@ -11,7 +10,17 @@ from rastervision.pytorch_learner.learner_config import (
 log = logging.getLogger(__name__)
 
 
-@register_config('pytorch_learner_backend')
+def pytorch_learner_backend_config_upgrader(cfg_dict: dict,
+                                            version: int) -> dict:
+    if version == 1:
+        # removed in version 2
+        cfg_dict.pop('test_mode', None)
+    return cfg_dict
+
+
+@register_config(
+    'pytorch_learner_backend',
+    upgrader=pytorch_learner_backend_config_upgrader)
 class PyTorchLearnerBackendConfig(BackendConfig):
     """Configure a :class:`.PyTorchLearnerBackend`."""
 
@@ -23,42 +32,37 @@ class PyTorchLearnerBackendConfig(BackendConfig):
     run_tensorboard: bool = Field(
         False,
         description='If True, run Tensorboard server pointing at log files.')
-    test_mode: bool = Field(
+    save_all_checkpoints: bool = Field(
         False,
-        description=
-        ('This field is passed along to the LearnerConfig which is returned by '
-         'get_learner_config(). For more info, see the docs for'
-         'pytorch_learner.learner_config.LearnerConfig.test_mode.'))
+        description=(
+            'If True, all checkpoints would be saved. The latest checkpoint '
+            'would be saved as `last-model.pth`. The checkpoints prior to '
+            'last epoch are stored as `model-ckpt-epoch-{N}.pth` where `N` '
+            'is the epoch number.'))
 
     def get_bundle_filenames(self):
         return ['model-bundle.zip']
 
-    def update(self, pipeline: Optional[RVPipelineConfig] = None):
+    def update(self, pipeline: RVPipelineConfig | None = None):
         super().update(pipeline=pipeline)
 
         if isinstance(self.data, ImageDataConfig):
             if self.data.uri is None and self.data.group_uris is None:
                 self.data.uri = pipeline.chip_uri
 
-        if not self.data.class_names:
-            # We want to defer validating class_names against class_colors
-            # until we have updated both. Hence, we use Config.copy(update=)
-            # here because it does not trigger pydantic validators.
-            self.data = self.data.copy(
-                update={'class_names': pipeline.dataset.class_config.names})
-        if not self.data.class_colors:
-            self.data.class_colors = pipeline.dataset.class_config.colors
+        if self.data.class_config is None:
+            self.data.class_config = pipeline.dataset.class_config
 
         if not self.data.img_channels:
             self.data.img_channels = self.get_img_channels(pipeline)
 
-    def get_learner_config(self, pipeline: Optional[RVPipelineConfig]):
+    def get_learner_config(self, pipeline: RVPipelineConfig | None):
         raise NotImplementedError()
 
-    def build(self, pipeline: Optional[RVPipelineConfig], tmp_dir: str):
+    def build(self, pipeline: RVPipelineConfig | None, tmp_dir: str):
         raise NotImplementedError()
 
-    def filter_commands(self, commands: List[str]) -> List[str]:
+    def filter_commands(self, commands: list[str]) -> list[str]:
         nochip = isinstance(self.data, GeoDataConfig)
         if nochip and 'chip' in commands:
             commands = [c for c in commands if c != 'chip']

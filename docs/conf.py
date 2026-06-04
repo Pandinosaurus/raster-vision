@@ -6,7 +6,7 @@
 # full list see the documentation:
 # http://www.sphinx-doc.org/en/stable/config
 
-from typing import TYPE_CHECKING, List
+from typing import TYPE_CHECKING
 import sys
 from unittest.mock import MagicMock
 
@@ -21,13 +21,13 @@ class Mock(MagicMock):
         return MagicMock()
 
 
-MOCK_MODULES = ['pyproj', 'h5py', 'osgeo']
+MOCK_MODULES = ['h5py', 'osgeo']
 sys.modules.update((mod_name, Mock()) for mod_name in MOCK_MODULES)
 
 # -- Allow Jinja templates in non-template .rst files -------------------------
 
 
-def rstjinja(app: 'Sphinx', docname: str, source: List[str]) -> None:
+def rstjinja(app: 'Sphinx', docname: str, source: list[str]) -> None:
     """Allow use of jinja templating in all doc pages.
 
     Adapted from:
@@ -72,9 +72,9 @@ author = u'Azavea'
 # built documents.
 #
 # The short X.Y version.
-version = u'0.21'
+version = u'0.31'
 # The full version, including alpha/beta/rc tags
-release = u'0.21'
+release = u'0.31.2-dev'
 
 # -- Extension configuration --------------------------------------------------
 
@@ -124,7 +124,7 @@ autosummary_ignore_module_all = False
 autodoc_typehints = 'both'
 autodoc_class_signature = 'separated'
 autodoc_member_order = 'groupwise'
-autodoc_mock_imports = ['torch', 'torchvision', 'pycocotools', 'geopandas']
+autodoc_mock_imports = ['pycocotools']
 #########################
 
 #########################
@@ -140,6 +140,7 @@ nbsphinx_thumbnails = {
     # more natural img/tensorboard.png path does not work.
     'usage/tutorials/train': '_images/tensorboard.png',
     'usage/tutorials/lightning_workflow': '_images/lightning-logo.png',
+    'usage/tutorials/onnx_inference': '_images/ONNX_Runtime_logo_dark.png',
 }
 nbsphinx_prolog = r"""
 {% set docpath = env.doc2path(env.docname, base=False) %}
@@ -154,7 +155,7 @@ nbsphinx_prolog = r"""
 
     .. note::
 
-        If running outside of the Docker image, you might need to set a couple of environment variables manually. You can do it like so:
+        If running outside of the Docker image, you may need to set some environment variables manually. You can do it like so:
 
         .. code-block:: python
 
@@ -203,6 +204,10 @@ intersphinx_mapping = {
     'onnx': (
         'https://onnx.ai/onnx/',
         'https://onnx.ai/onnx/objects.inv',
+    ),
+    'sagemaker': (
+        'https://sagemaker.readthedocs.io/en/stable/',
+        'https://sagemaker.readthedocs.io/en/stable/objects.inv',
     ),
 }
 
@@ -259,7 +264,13 @@ language = 'en'
 # directories to ignore when looking for source files.
 # These patterns also affect html_static_path and html_extra_path
 exclude_patterns = [
-    '_build', 'Thumbs.db', '.DS_Store', 'README.md', '**.ipynb_checkpoints'
+    '_build',
+    'Thumbs.db',
+    '.DS_Store',
+    'README.md',
+    '**.ipynb_checkpoints',
+    '**/data/**',
+    '**/.*/**',
 ]
 
 # The reST default role (used for this markup: `text`) to use for all
@@ -283,7 +294,7 @@ exclude_patterns = [
 
 # The name of the Pygments (syntax highlighting) style to use.
 #
-# To see all availabel values:
+# To see all available values:
 # >>> from pygments.styles import get_all_styles
 # >>> styles = list(get_all_styles())
 #

@@ -1,12 +1,13 @@
-from typing import Callable
+from collections.abc import Callable
 import unittest
-from pydantic import ValidationError
+
+import numpy as np
 
 from rastervision.core.data import (ClassConfig, DatasetConfig)
 from rastervision.pipeline.config import build_config
 from rastervision.core.rv_pipeline.semantic_segmentation_config import (
     SemanticSegmentationConfig, SemanticSegmentationPredictOptions,
-    ss_config_upgrader)
+    SemanticSegmentationChipOptions, ss_config_upgrader)
 from rastervision.pytorch_backend import PyTorchSemanticSegmentationConfig
 from rastervision.pytorch_learner import (SemanticSegmentationModelConfig,
                                           SolverConfig,
@@ -46,27 +47,30 @@ class TestSemanticSegmentationConfig(unittest.TestCase):
 
 
 class TestSemanticSegmentationPredictOptions(unittest.TestCase):
-    def assertNoError(self, fn: Callable, msg: str = ''):
-        try:
-            fn()
-        except Exception:
-            self.fail(msg)
+    def test_crop_sz_validator(self):
+        args = dict(chip_sz=10, stride=4, crop_sz='auto')
+        cfg = SemanticSegmentationPredictOptions(**args)
+        self.assertEqual(cfg.crop_sz, 3)
 
-    def test_upgrader(self):
-        args = dict(stride=None, crop_sz=None)
-        self.assertNoError(lambda: SemanticSegmentationPredictOptions(**args))
+        args = dict(chip_sz=10, stride=5, crop_sz='auto')
+        cfg = SemanticSegmentationPredictOptions(**args)
+        self.assertEqual(cfg.crop_sz, 2)
 
-        args = dict(stride=None, crop_sz='auto')
-        self.assertRaises(ValidationError,
-                          lambda: SemanticSegmentationPredictOptions(**args))
 
-        args = dict(stride=None, crop_sz=10)
-        self.assertRaises(ValidationError,
-                          lambda: SemanticSegmentationPredictOptions(**args))
+class TestSemanticSegmentationChipOptions(unittest.TestCase):
+    def test_enough_target_pixels_true(self):
+        chip = np.zeros((10, 10, 1), dtype=np.uint8)
+        chip[4:, 4:, :] = 1
+        chip_options = SemanticSegmentationChipOptions(
+            sampling={}, target_class_ids=[1], target_count_threshold=30)
+        self.assertTrue(chip_options.enough_target_pixels(chip))
 
-        args = dict(stride=10, crop_sz=0)
-        self.assertRaises(ValidationError,
-                          lambda: SemanticSegmentationPredictOptions(**args))
+    def test_enough_target_pixels_false(self):
+        chip = np.zeros((10, 10, 1), dtype=np.uint8)
+        chip[7:, 7:, :] = 1
+        chip_options = SemanticSegmentationChipOptions(
+            sampling={}, target_class_ids=[1], target_count_threshold=30)
+        self.assertFalse(chip_options.enough_target_pixels(chip))
 
 
 if __name__ == '__main__':

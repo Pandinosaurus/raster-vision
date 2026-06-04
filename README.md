@@ -20,7 +20,7 @@ It has built-in support for chip classification, object detection, and semantic 
 **As a low-code framework**, Raster Vision allows users (who don't need to be experts in deep learning!) to quickly and repeatably configure experiments that execute a machine learning pipeline including: analyzing training data, creating training chips, training models, creating predictions, evaluating models, and bundling the model files and configuration for easy deployment.
 ![Overview of Raster Vision workflow](docs/img/rv-pipeline-overview.png)
 
-Raster Vision also has built-in support for running experiments in the cloud using [AWS Batch](https://github.com/azavea/raster-vision-aws).
+Raster Vision also has built-in support for running experiments in the cloud using [AWS Batch](https://docs.rastervision.io/en/stable/setup/aws.html#running-on-aws-batch) as well as [AWS Sagemaker](https://docs.rastervision.io/en/stable/setup/aws.html#running-on-aws-sagemaker).
 
 See the [documentation](https://docs.rastervision.io/en/stable/) for more details.
 
@@ -59,26 +59,25 @@ You can ask questions and talk to developers (let us know what you're working on
 * [Discussion Forum](https://github.com/azavea/raster-vision/discussions)
 * [Mailing List](https://groups.google.com/forum/#!forum/raster-vision)
 
+## Developing
+
+To set up the development environment:
+- For and clone the repo and navigate to it.
+- Create and activate a new Python virtual environment via your environment manager of choice (`mamba`, `uv`, `pyenv`, etc.).
+- Run `scripts/setup_dev_env.sh` to install all Raster Vision plugins in editable mode along with all the dependencies.
+
 ## Contributing
 
-*For more information, see the [Contribution page](https://docs.rastervision.io/en/stable/CONTRIBUTING.html).*
+*For more information, see [Contributing](https://docs.rastervision.io/en/stable/CONTRIBUTING.html).*
 
 We are happy to take contributions! It is best to get in touch with the maintainers
 about larger features or design changes *before* starting the work,
 as it will make the process of accepting changes smoother.
 
-Everyone who contributes code to Raster Vision will be asked to sign the
-Azavea CLA, which is based off of the Apache CLA.
+Everyone who contributes code to Raster Vision will be asked to sign a Contributor License Agreement. See [Contributing](https://docs.rastervision.io/en/stable/CONTRIBUTING.html) for instructions.
 
-1. Download a copy of the [Raster Vision Individual Contributor License
-   Agreement](docs/_static/cla/2018_04_17-Raster-Vision-Open-Source-Contributor-Agreement-Individual.pdf)
-   or the [Raster Vision Corporate Contributor License
-   Agreement](docs/_static/cla/2018_04_18-Raster-Vision-Open-Source-Contributor-Agreement-Corporate.pdf)
+## Licenses
 
-2. Print out the CLAs and sign them, or use PDF software that allows placement of a signature image.
+Raster Vision is licensed under the Apache 2 license. See license [here](./LICENSE).
 
-3. Send the CLAs to Azavea by one of:
-  - Scanning and emailing the document to cla@azavea.com
-  - Faxing a copy to +1-215-925-2600.
-  - Mailing a hardcopy to:
-    Azavea, 990 Spring Garden Street, 5th Floor, Philadelphia, PA 19107 USA
+3rd party licenses for all dependecies used by Raster Vision can be found [here](./THIRD_PARTY_LICENSES.txt).

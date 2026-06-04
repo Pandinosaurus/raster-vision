@@ -1,10 +1,10 @@
-from typing import List
+from collections.abc import Callable
+from os.path import join
 import unittest
 
-from pydantic.error_wrappers import ValidationError
-
-from rastervision.pipeline.config import (Config, register_config,
-                                          build_config, upgrade_config)
+from rastervision.pipeline.file_system.utils import get_tmp_dir, json_to_file
+from rastervision.pipeline.config import (
+    Config, register_config, build_config, upgrade_config, ValidationError)
 from rastervision.pipeline.pipeline_config import (PipelineConfig)
 from rastervision.pipeline import registry_ as registry
 
@@ -45,14 +45,26 @@ def c_upgrader(cfg_dict, version):
 
 @register_config('c', plugin='rastervision.c', upgrader=c_upgrader)
 class CConfig(PipelineConfig):
-    al: List[AConfig]
-    bl: List[BConfig]
+    al: list[AConfig]
+    bl: list[BConfig]
     a: AConfig
     b: BConfig
     x: str = 'x'
 
 
+@register_config('c2', plugin='rastervision.c')
+class CConfig2(Config):
+    n: int
+    abc: str
+
+
 class TestConfig(unittest.TestCase):
+    def assertNoError(self, fn: Callable, msg: str = ''):
+        try:
+            fn()
+        except Exception:
+            self.fail(msg)
+
     def setUp(self):
         registry.set_plugin_version('rastervision.ab', 1)
         registry.set_plugin_version('rastervision.c', 1)
@@ -109,7 +121,7 @@ class TestConfig(unittest.TestCase):
             'x'
         }
 
-        self.assertDictEqual(cfg.dict(), exp_dict)
+        self.assertDictEqual(cfg.dict(with_rv_metadata=False), exp_dict)
         self.assertEqual(build_config(exp_dict), cfg)
 
     def test_no_extras(self):
@@ -201,6 +213,25 @@ class TestConfig(unittest.TestCase):
 
         upgraded_c_dict = upgrade_config(c_dict_v0)
         self.assertDictEqual(upgraded_c_dict, c_dict_v1)
+
+    def test_deserialize(self):
+        cfg = CConfig2(n=1, abc='abc')
+        cfg_dict = cfg.dict()
+
+        self.assertEqual(CConfig2.deserialize(cfg), cfg)
+
+        self.assertNoError(lambda: CConfig2.deserialize(cfg_dict))
+        cfg_deserialized = CConfig2.deserialize(cfg_dict)
+        self.assertDictEqual(cfg_deserialized.dict(), cfg_dict)
+
+        with get_tmp_dir() as tmp_dir:
+            uri = join(tmp_dir, 'cfg.json')
+            json_to_file(cfg_dict, uri)
+            self.assertNoError(lambda: CConfig2.deserialize(uri))
+            cfg_deserialized = CConfig2.deserialize(uri)
+            self.assertDictEqual(cfg_deserialized.dict(), cfg_dict)
+
+        self.assertRaises(TypeError, lambda: CConfig2.deserialize(0))
 
 
 if __name__ == '__main__':

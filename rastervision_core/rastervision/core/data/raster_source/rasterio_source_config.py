@@ -1,10 +1,10 @@
-from typing import List, Union
-
+from rastervision.core.box import Box
 from rastervision.core.data.raster_source import RasterSourceConfig, RasterioSource
 from rastervision.pipeline.config import ConfigError, Field, register_config
 
 
-def rasterio_source_config_upgrader(cfg_dict: dict, version: int) -> dict:
+def rasterio_source_config_upgrader(cfg_dict: dict,
+                                    version: int) -> dict:  # pragma: no cover
     if version == 5:
         # removed in version 6
         x_shift = cfg_dict.get('x_shift', 0)
@@ -24,7 +24,7 @@ def rasterio_source_config_upgrader(cfg_dict: dict, version: int) -> dict:
 class RasterioSourceConfig(RasterSourceConfig):
     """Configure a :class:`.RasterioSource`."""
 
-    uris: Union[str, List[str]] = Field(
+    uris: str | list[str] = Field(
         ...,
         description='One or more image URIs that comprise the imagery for a '
         'scene. The format of each file can be any that can be read by '
@@ -34,14 +34,20 @@ class RasterioSourceConfig(RasterSourceConfig):
         False,
         description='Stream assets as needed rather than downloading them.')
 
-    def build(self, tmp_dir, use_transformers=True):
-        raster_transformers = ([rt.build() for rt in self.transformers]
-                               if use_transformers else [])
-
+    def build(self, tmp_dir: str | None,
+              use_transformers: bool = True) -> RasterioSource:
+        if use_transformers:
+            raster_transformers = [
+                t.build(channel_order=self.channel_order)
+                for t in self.transformers
+            ]
+        else:
+            raster_transformers = []
+        bbox = Box(*self.bbox) if self.bbox is not None else None
         return RasterioSource(
             uris=self.uris,
             raster_transformers=raster_transformers,
             tmp_dir=tmp_dir,
             allow_streaming=self.allow_streaming,
             channel_order=self.channel_order,
-            bbox=self.bbox)
+            bbox=bbox)

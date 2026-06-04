@@ -1,10 +1,11 @@
-from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
+from abc import ABC, abstractmethod
 from contextlib import AbstractContextManager
 
 if TYPE_CHECKING:
     from rastervision.core.data_sample import DataSample
-    from rastervision.core.data import Labels, Scene
+    from rastervision.core.data import DatasetConfig, Labels, Scene
+    from rastervision.core.rv_pipeline import ChipOptions, PredictOptions
 
 
 class SampleWriter(AbstractContextManager):
@@ -17,7 +18,6 @@ class SampleWriter(AbstractContextManager):
     @abstractmethod
     def write_sample(self, sample: 'DataSample'):
         """Writes a single sample."""
-        pass
 
 
 class Backend(ABC):
@@ -30,7 +30,6 @@ class Backend(ABC):
     @abstractmethod
     def get_sample_writer(self):
         """Returns a SampleWriter for this Backend."""
-        pass
 
     @abstractmethod
     def train(self):
@@ -39,22 +38,33 @@ class Backend(ABC):
         This should download chips created by the SampleWriter, train the model, and
         then saving it to disk.
         """
-        pass
 
     @abstractmethod
-    def load_model(self):
-        """Load the model in preparation for one or more prediction calls."""
-        pass
+    def load_model(self, uri: str | None = None):
+        """Load the model in preparation for one or more prediction calls.
+
+        Args:
+            uri: Optional URI to load the model from.
+        """
 
     @abstractmethod
-    def predict_scene(self, scene: 'Scene', chip_sz: int,
-                      stride: int) -> 'Labels':
+    def predict_scene(self, scene: 'Scene',
+                      predict_options: 'PredictOptions') -> 'Labels':
         """Return predictions for an entire scene using the model.
 
         Args:
-            scene (Scene): Scene to run inference on.
+            scene: Scene to run inference on.
+            predict_options: Prediction options.
 
         Return:
             Labels object containing predictions
         """
-        pass
+
+    @abstractmethod
+    def chip_dataset(self, dataset: 'DatasetConfig',
+                     chip_options: 'ChipOptions') -> None:
+        """Create and write chips for scenes in a :class:`.DatasetConfig`.
+
+        Args:
+            scenes: Scenes to chip.
+        """

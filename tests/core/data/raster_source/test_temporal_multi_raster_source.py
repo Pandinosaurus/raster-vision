@@ -1,4 +1,4 @@
-from typing import Callable, List
+from collections.abc import Callable
 import unittest
 
 import numpy as np
@@ -10,7 +10,7 @@ from rastervision.core.data.raster_source import (TemporalMultiRasterSource,
                                                   XarraySource)
 
 
-def make_raster_source(num_channels_raw: int, channel_order: List[int]):
+def make_raster_source(num_channels_raw: int, channel_order: list[int]):
     dtype = np.uint8
     arr = np.ones((5, 5, num_channels_raw), dtype=dtype)
     arr *= np.arange(num_channels_raw, dtype=dtype)
@@ -104,6 +104,10 @@ class TestTemporalMultiRasterSource(unittest.TestCase):
                 [[1]],
             ], dtype=dtype)
         np.testing.assert_array_equal(chip, chip_expected)
+
+    def test_from_stac(self):
+        self.assertRaises(NotImplementedError,
+                          TemporalMultiRasterSource.from_stac)
 
 
 if __name__ == '__main__':

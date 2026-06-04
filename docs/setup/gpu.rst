@@ -3,7 +3,9 @@
 Using GPUs
 ==========
 
-To run Raster Vision on a realistic dataset in a reasonable amount of time, it is necessary to use a machine with a GPU. Note that Raster Vision will use a GPU if it detects that one is available. If you don't own a machine with a GPU, it is possible to rent one by the minute using a cloud provider such as AWS.
+To run Raster Vision on a realistic dataset in a reasonable amount of time, it is necessary to use a machine with one or more GPUs. Note that Raster Vision will automatically use all available GPUs.
+
+If you don't own a machine with a GPU, it is possible to rent one by the minute using a cloud provider such as AWS. See :doc:`aws`.
 
 Check that GPU is available
 ---------------------------
@@ -16,14 +18,7 @@ One way to check this is to make sure PyTorch can see the GPU(s). To do this, op
 
     import torch
     torch.cuda.is_available()
-    torch.cuda.get_device_name(0)
-
-This should print out something like:
-
-.. code-block:: console
-
-    True
-    Tesla K80
+    torch.cuda.device_count()
 
 If you have `nvidia-smi <https://developer.nvidia.com/nvidia-system-management-interface>`_  installed, you can also use this command to inspect GPU utilization while the training job is running:
 
@@ -38,42 +33,44 @@ If you would like to run Raster Vision in a Docker container with GPUs, you'll n
 
 First, you'll need to install the `nvidia-docker <https://github.com/NVIDIA/nvidia-docker>`_ runtime on your system. Follow their `Quickstart <https://github.com/NVIDIA/nvidia-docker#quickstart>`_ and installation instructions. Make sure that your GPU is supported by NVIDIA Docker - if not you might need to find another way to have your Docker container communicate with the GPU. If you figure out how to support more GPUs, please let us know so we can add the steps to this documentation!
 
-When running your Docker container, be sure to include the ``--runtime=nvidia`` option, e.g.
+When running your Docker container, be sure to include the ``--gpus=all`` option, e.g.
 
 .. code-block:: console
 
-   > docker run --runtime=nvidia --rm -it quay.io/azavea/raster-vision:pytorch-{{ version }} /bin/bash
+   > docker run --gpus=all --rm -it quay.io/azavea/raster-vision:pytorch-{{ version }} /bin/bash
 
 or use the ``--gpu`` option with the ``docker/run`` script.
 
-.. _aws ec2 setup:
+.. _distributed:
 
-Running on AWS EC2
-------------------
+Using multiple GPUs (distributed training)
+------------------------------------------
 
-The simplest way to run Raster Vision on an AWS GPU is by starting a GPU-enabled EC2 instance such as a p3.2xlarge using the `Deep Learning AMI <https://aws.amazon.com/machine-learning/amis/>`_. We have tested this using the "Deep Learning AMI GPU PyTorch 1.11.0 (Ubuntu 20.04)" with id ``ami-0c968d7ef8a4b0c34``. After SSH'ing into the instance, Raster Vision can be installed with ``pip``, and code can be transfered to this instance with a tool such as ``rsync``.
+Raster Vision supports distributed training (multi-node and multi-GPU) via `PyTorch DDP <https://pytorch.org/docs/master/notes/ddp.html>`_.
 
-.. _aws batch setup:
+It can be used in the following ways:
 
-Running on AWS Batch
---------------------
+- Run Raster Vision normally on a multi-GPU machine. Raster Vision will automatically detect the multiple GPU and use distributed training when ``Learner.train()`` is called. 
+- Run Raster Vision using the `torchrun CLI command <https://pytorch.org/docs/stable/elastic/run.html>`_. For example, to run on a single machine with 4 GPUs:
 
-AWS Batch is a service that makes it easier to run Dockerized computation pipelines in the cloud. It starts and stops the appropriate instances automatically and runs jobs sequentially or in parallel according to the dependencies between them. To run Raster Vision using AWS Batch, you'll need to setup your AWS account with a specific set of Batch resources, which you can do using :ref:`cloudformation setup`. After creating the resources on AWS, set the following configuration in your Raster Vision config. Check the AWS Batch console to see the names of the resources that were created, as they vary depending on how CloudFormation was configured.
+  .. code-block:: console
 
-.. code:: ini
+     torchrun --standalone --nnodes=1 --nproc-per-node=4 --no-python \
+        rastervision run local rastervision_pytorch_backend/rastervision/pytorch_backend/examples/tiny_spacenet.py
 
-    [BATCH]
-    gpu_job_queue=RasterVisionGpuJobQueue
-    gpu_job_def=RasterVisionHostedPyTorchGpuJobDefinition
-    cpu_job_queue=RasterVisionCpuJobQueue
-    cpu_job_def=RasterVisionHostedPyTorchCpuJobDefinition
-    attempts=5
+Other considerations
+~~~~~~~~~~~~~~~~~~~~
 
-* ``gpu_job_queue`` - job queue for GPU jobs
-* ``gpu_job_def`` - job definition that defines the GPU Batch jobs
-* ``cpu_job_queue`` - job queue for CPU-only jobs
-* ``cpu_job_def`` - job definition that defines the CPU-only Batch jobs
-* ``attempts`` - Optional number of attempts to retry failed jobs. It is good to set this to > 1 since Batch often kills jobs for no apparent reason.
+- Config variables that may be :ref:`set via environment or RV config <raster vision config>` (also documented `here <https://raster-vision--2018.org.readthedocs.build/en/2018/api_reference/_generated/rastervision.pytorch_learner.learner.Learner.html#learner>`_):
 
-.. seealso::
-   For more information about how Raster Vision uses AWS Batch, see the section: :ref:`aws batch`.
+  - ``RASTERVISION_USE_DDP``: ``YES`` by default. Set to ``NO`` to disable distributed training.
+  - ``RASTERVISION_DDP_BACKEND``: ``nccl`` by default. This is the recommended backend for CUDA GPUs.
+  - ``RASTERVISION_DDP_START_METHOD``: One of ``spawn``, ``fork``, or ``forkserver``. Passed to :func:`torch.multiprocessing.start_processes`. Default: ``spawn``.
+
+    - ``spawn`` is what PyTorch documentation recommends (in fact, it doesn't even mention the alternatives), but it has the disadvantage that it requires everything to be pickleable, which rasterio dataset objects are not. This is also true for ``forkserver``, which needs to spawn a server process. However, ``fork`` does not have the same limitation.
+    - If not ``fork``, we avoid building the dataset in the base process and instead delay it until the worker processes are created.
+    - If ``fork`` or ``forkserver``, the CUDA runtime must not be initialized before the fork happens; otherwise, a ``RuntimeError: Cannot re-initialize CUDA in forked subprocess.`` error will be raised. We avoid this by not calling any ``torch.cuda`` functions or creating tensors on the GPU.
+    
+- To avoid having to re-download files for each process when building datasets, it is recommended to :meth:`manually specify a temporary directory <.RVConfig.set_tmp_dir_root>` (otherwise each process will use a separate randomly generated temporary directory). When a single temp directory is set, to avoid IO conflicts, Raster Vision first builds the datasets only in the master process (rank = 0) and only after in the other processes, so that they use the already downloaded files.
+- A similar problem also occurs when downloading external models/losses, but in this case, the strategy of building on the master first does not work. The model apparently needs to be created by the same line of code on each process. Therefore, we need to download files separately for each process; we do this by modifying ``TORCH_HOME`` to ``$TORCH_HOME/<local rank>``. And only the master process copies the downloaded files to the training directory.
+- Raster Vision will use all available GPUs by default. To override, set the ``WORLD_SIZE`` env var.

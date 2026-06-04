@@ -1,5 +1,5 @@
-from typing import TYPE_CHECKING, Optional
-from abc import ABC, abstractmethod, abstractproperty
+from typing import TYPE_CHECKING
+from abc import ABC, abstractmethod
 
 if TYPE_CHECKING:
     from rastervision.core.box import Box
@@ -14,23 +14,23 @@ class LabelStore(ABC):
         """Save.
 
         Args:
-           labels - Labels to be saved, the type of which will be dependant on the type
+           labels - Labels to be saved, the type of which will be dependent on the type
                     of pipeline.
         """
-        pass
 
     @abstractmethod
     def get_labels(self):
         """Loads Labels from this label store."""
-        pass
 
-    @abstractproperty
-    def bbox(self) -> Optional['Box']:
-        pass
+    @property
+    @abstractmethod
+    def bbox(self) -> 'Box | None':
+        """Bounding box applied to the source."""
 
-    @abstractproperty
+    @property
+    @abstractmethod
     def crs_transformer(self) -> 'CRSTransformer':
-        pass
+        """Associated :class:`.CRSTransformer`."""
 
     @abstractmethod
     def set_bbox(self, extent: 'Box') -> None:
@@ -41,4 +41,3 @@ class LabelStore(ABC):
         Args:
             extent (Box): User-specified extent in pixel coordinates.
         """
-        pass

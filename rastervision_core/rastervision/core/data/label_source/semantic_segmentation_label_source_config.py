@@ -1,5 +1,3 @@
-from typing import Union
-
 from rastervision.core.data.raster_source import (RasterSourceConfig,
                                                   RasterizedSourceConfig)
 from rastervision.core.data.label_source import (
@@ -7,13 +5,11 @@ from rastervision.core.data.label_source import (
 from rastervision.pipeline.config import (register_config, Field)
 
 
-def ss_label_source_config_upgrader(cfg_dict: dict, version: int) -> dict:
-    if version < 4:
-        try:
-            # removed in version 4
-            del cfg_dict['rgb_class_config']
-        except KeyError:
-            pass
+def ss_label_source_config_upgrader(cfg_dict: dict,
+                                    version: int) -> dict:  # pragma: no cover
+    if version == 3:
+        # removed in version 4
+        cfg_dict.pop('rgb_class_config', None)
     return cfg_dict
 
 
@@ -23,7 +19,7 @@ def ss_label_source_config_upgrader(cfg_dict: dict, version: int) -> dict:
 class SemanticSegmentationLabelSourceConfig(LabelSourceConfig):
     """Configure a :class:`.SemanticSegmentationLabelSource`."""
 
-    raster_source: Union[RasterSourceConfig, RasterizedSourceConfig] = Field(
+    raster_source: RasterSourceConfig | RasterizedSourceConfig = Field(
         ..., description='The labels in the form of rasters.')
 
     def build(self, class_config, crs_transformer, bbox=None,

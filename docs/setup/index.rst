@@ -10,6 +10,7 @@ Installation
     self
     configure
     gpu
+    aws
 
 .. _install raster vision:
 
@@ -18,7 +19,7 @@ Installing via pip
 
 .. currentmodule:: rastervision
 
-You can directly install the library using ``pip`` (or ``pip3`` if you also have Python 2 installed).
+You can directly install the library using ``pip``.
 
 .. code-block:: console
 
@@ -26,21 +27,22 @@ You can directly install the library using ``pip`` (or ``pip3`` if you also have
 
 .. note::
 
-    You will also need to set a couple of environment variables required by ``rasterio``. You can do it like so:
+    You might also need to set an environment variable required by ``rasterio`` like so:
 
     .. code-block:: console
 
         > export GDAL_DATA=$(pip show rasterio | grep Location | awk '{print $NF"/rasterio/gdal_data/"}')
-        > export AWS_NO_SIGN_REQUEST=YES
 
 
 This has been shown to work in the following environment. Variations on this environment may or may not work.
 
-* Ubuntu Linux 20.04
-* Python 3.9
-* CUDA 11.6 and NVIDIA Driver 510.47.03 (for GPU support)
+* Ubuntu Linux 22.04
+* Python 3.11
+* CUDA 12 and NVIDIA Driver 535 (for GPU support)
 
-Raster Vision also runs on macOS version 12.1, except that the ``num_workers`` for the :class:`.DataLoader` will need to be set to 0 due to an issue with mulitprocessing on Macs with Python >= 3.8. It will also be necessary to install GDAL (check `here <{{ repo }}/rastervision_gdal_vsi/requirements.txt>`__ for the exact version) prior to installing Raster Vision, which isn't necessary on Linux.
+.. warning::
+
+    Raster Vision also runs on macOS version 12.1, except that the ``num_workers`` for the :class:`.DataLoader` will need to be set to 0 due to an issue with mulitprocessing on Macs with Python >= 3.8. It will also be necessary to install GDAL (check `here <{{ repo }}/rastervision_gdal_vsi/requirements.txt>`__ for the exact version) prior to installing Raster Vision, which isn't necessary on Linux.
 
 .. warning::
 
@@ -68,7 +70,21 @@ is equivalent to running the following sequence of commands:
     > pip install rastervision_pytorch_learner=={{ version }}
     > pip install rastervision_pytorch_backend=={{ version }}
 
-Another optional plugin that is available, but not installed by default,  is :mod:`rastervision.gdal_vsi`.
+Extra plugins
+^^^^^^^^^^^^^
+
+:mod:`rastervision.aws_sagemaker`
+"""""""""""""""""""""""""""""""""
+This plugin adds the :class:`.AWSSageMakerRunner`, allowing you to run Raster Vision jobs on AWS SageMaker via ``rastervision run sagemaker ...``. To install:
+
+.. code-block:: console
+
+    > pip install rastervision_aws_sagemaker=={{ version }}
+
+:mod:`rastervision.gdal_vsi`
+""""""""""""""""""""""""""""
+
+This plugin adds a new :class:`.FileSystem`, the :class:`.VsiFileSystem`, which allows the use of GDAL for IO. To install:
 
 .. code-block:: console
 
@@ -85,15 +101,15 @@ The command above will attempt to install GDAL via ``pip``. If that fails, you c
 Docker Images
 -------------
 
-Using the Docker images published for Raster Vision makes it easy to use a fully set up environment. We have tested this with Docker 20, although you may be able to use a lower version.
+Using the Docker images published for Raster Vision makes it easy to use a fully set up environment.
 
-The images we publish include plugins and dependencies for using Raster Vision with PyTorch, AWS S3, and Batch. These are published to `quay.io/azavea/raster-vision <https://quay.io/repository/azavea/raster-vision>`_.  To run the container for the latest release, run:
+The images we publish include all plugins and dependencies for using Raster Vision with PyTorch and AWS. These are published to `quay.io/azavea/raster-vision <https://quay.io/repository/azavea/raster-vision>`_ (see the *tags* tab).  To run the container for the latest release, run:
 
 .. code-block:: console
 
    > docker run --rm -it quay.io/azavea/raster-vision:pytorch-{{ version }} /bin/bash
 
-There are also images with the `-latest` suffix for the latest commits on the ``master`` branch. You'll likely need to mount volumes and expose ports to make this container fully useful; see the `docker/run <{{ repo }}/docker/run>`_ script for an example usage.
+There are also images with the ``-latest`` suffix for the latest commits on the ``master`` branch. You'll likely need to mount volumes and expose ports to make this container fully useful; see the `docker/run <{{ repo }}/docker/run>`_ script for an example usage.
 
 You can also base your own Dockerfiles off the Raster Vision image to use with your own codebase. See :ref:`bootstrap` for more information.
 
@@ -124,15 +140,15 @@ To run a Bash console in the PyTorch Docker container use:
 
 This will mount the ``$RASTER_VISION_DATA_DIR`` local directory to to ``/opt/data/`` inside the container.
 
+.. note::
+
+    If you have built an ARM64 image, you should pass the ``--arm64`` flag to ``docker/run``.
+
 .. warning::
 
     Users running under WSL2 in Windows will need to unset the ``NAME`` environment variable. For example, instead of
     ``docker/run``, you would run ``NAME='' docker/run``. By default, WSL2 sets a ``NAME`` variable that matches the network
     name of your computer. This environment variable collides with a variable in the ``docker/run`` script.
-
-.. warning::
-
-    If you have built an ARM64 image, you should pass the ``--arm64`` flag to ``docker/run``.
 
 This script also has options for forwarding AWS credentials, and running Jupyter notebooks which can be seen below.
 

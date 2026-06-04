@@ -5,8 +5,50 @@ from xarray import DataArray
 
 from rastervision.core.box import Box
 from rastervision.core.data.crs_transformer import IdentityCRSTransformer
-from rastervision.core.data.raster_source import (ChannelOrderError,
-                                                  XarraySource)
+from rastervision.core.data.raster_source import (
+    ChannelOrderError, XarraySource, XarraySourceConfig, STACItemConfig,
+    STACItemCollectionConfig)
+
+from tests import data_file_path
+
+
+class TestXarraySourceConfig(unittest.TestCase):
+    def test_build_with_item(self):
+        bbox = Box(
+            ymin=48.8155755, xmin=2.224122, ymax=48.902156, xmax=2.4697602)
+        item_uri = data_file_path('stac/item.json')
+        cfg = XarraySourceConfig(
+            stac=STACItemConfig(uri=item_uri, assets=['red']),
+            bbox_map_coords=tuple(bbox),
+            allow_streaming=True,
+            temporal=False,
+        )
+        rs = cfg.build()
+        self.assertIsInstance(rs, XarraySource)
+        self.assertFalse(rs.temporal)
+
+    def test_build_with_item_collection(self):
+        bbox = Box(
+            ymin=48.8155755, xmin=2.224122, ymax=48.902156, xmax=2.4697602)
+        item_coll_uri = data_file_path('stac/item_collection.json')
+        cfg = XarraySourceConfig(
+            stac=STACItemCollectionConfig(uri=item_coll_uri, assets=['red']),
+            bbox_map_coords=tuple(bbox),
+            allow_streaming=True,
+            temporal=False,
+        )
+        with self.assertRaises(ValueError):
+            rs = cfg.build()
+
+        cfg = XarraySourceConfig(
+            stac=STACItemCollectionConfig(uri=item_coll_uri, assets=['red']),
+            bbox_map_coords=tuple(bbox),
+            allow_streaming=True,
+            temporal=True,
+        )
+        rs = cfg.build()
+        self.assertIsInstance(rs, XarraySource)
+        self.assertTrue(rs.temporal)
 
 
 class TestXarraySource(unittest.TestCase):
@@ -58,6 +100,35 @@ class TestXarraySource(unittest.TestCase):
         chip = rs.get_raw_chip(Box(0, 0, 1, 1))
         chip_expected = np.array([[[0, 1, 2, 3]]], dtype=arr.dtype)
         np.testing.assert_array_equal(chip, chip_expected)
+
+    def test_get_raw_chip_overflowing_window(self):
+        arr = np.arange(100).reshape(10, 10, 1)
+        da = DataArray(arr, dims=['y', 'x', 'band'])
+        rs = XarraySource(da, IdentityCRSTransformer(), bbox=Box(2, 2, 7, 7))
+
+        chip = rs.get_raw_chip(Box(3, 3, 7, 7))
+        chip_expected = np.zeros((4, 4, 1))
+        chip_expected[:2, :2] = arr[5:7, 5:7]
+        np.testing.assert_array_equal(chip, chip_expected)
+
+        chip = rs.get_raw_chip(Box(-2, -2, 2, 2))
+        chip_expected = np.zeros((4, 4, 1))
+        chip_expected[2:, 2:] = arr[2:4, 2:4]
+        np.testing.assert_array_equal(chip, chip_expected)
+
+        chip = rs.get_raw_chip(Box(-5, -5, 0, 0))
+        chip_expected = np.zeros((5, 5, 1))
+        np.testing.assert_array_equal(chip, chip_expected)
+
+        chip = rs.get_raw_chip(Box(6, 6, 9, 9))
+        chip_expected = np.zeros((3, 3, 1))
+        np.testing.assert_array_equal(chip, chip_expected)
+
+    def test_get_bbox_overflows_full_extent(self):
+        arr = np.empty((5, 5, 1))
+        da = DataArray(arr, dims=['y', 'x', 'band'])
+        rs = XarraySource(da, IdentityCRSTransformer(), bbox=Box(2, 2, 5, 7))
+        self.assertEqual(rs.bbox, Box(2, 2, 5, 5))
 
     def test_get_chip(self):
         arr = np.ones((5, 5, 4), dtype=np.uint8)

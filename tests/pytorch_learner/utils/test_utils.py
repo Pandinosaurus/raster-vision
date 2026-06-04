@@ -1,4 +1,4 @@
-from typing import Callable
+from collections.abc import Callable
 import unittest
 from os.path import join
 
@@ -7,17 +7,20 @@ from torch import nn
 import numpy as np
 from matplotlib import pyplot as plt
 import boto3
-from moto import mock_s3
+from moto import mock_aws
 import pandas as pd
 
 from rastervision.pipeline.file_system.utils import get_tmp_dir
+from rastervision.pipeline.pipeline_config import PipelineConfig
+from rastervision.pytorch_learner import (DataConfig, LearnerConfig,
+                                          SolverConfig)
 from rastervision.pytorch_learner.utils import (
     compute_conf_mat, compute_conf_mat_metrics, MinMaxNormalize,
     adjust_conv_channels, Parallel, SplitTensor, AddTensors,
-    validate_albumentation_transform, A, color_to_triple,
-    channel_groups_to_imgs, plot_channel_groups,
-    serialize_albumentation_transform, deserialize_albumentation_transform,
-    aggregate_metrics, log_metrics_to_csv, log_system_details)
+    validate_albumentation_transform, A, channel_groups_to_imgs,
+    plot_channel_groups, serialize_albumentation_transform,
+    deserialize_albumentation_transform, aggregate_metrics, log_metrics_to_csv,
+    log_system_details, get_learner_config_from_bundle_dir)
 from tests.data_files.lambda_transforms import lambda_transforms
 from tests import data_file_path
 
@@ -111,6 +114,23 @@ class TestComputeConfMatMetrics(unittest.TestCase):
             'b_f1': b_f1
         }
         self.assertDictEqual(round_dict(metrics), round_dict(exp_metrics))
+
+    def test_ignored_class(self):
+        label_names = ['a', 'b', 'c']
+        conf_mat = torch.tensor([[2., 0, 0], [0, 2, 0], [1, 1, 0]])
+        metrics = compute_conf_mat_metrics(conf_mat, label_names, ignore_idx=2)
+        exp_metrics = {
+            'avg_precision': 1.0,
+            'avg_recall': 1.0,
+            'avg_f1': 1.0,
+            'a_precision': 1.0,
+            'a_recall': 1.0,
+            'a_f1': 1.0,
+            'b_precision': 1.0,
+            'b_recall': 1.0,
+            'b_f1': 1.0
+        }
+        self.assertDictEqual(metrics, exp_metrics)
 
 
 class TestMinMaxNormalize(unittest.TestCase):
@@ -277,17 +297,6 @@ class TestOtherUtils(unittest.TestCase):
         except Exception:
             self.fail(msg)
 
-    def test_color_to_triple(self):
-        rgb = color_to_triple()
-        self.assertEqual(len(rgb), 3)
-        self.assertTrue(all(0 <= c < 256 for c in rgb))
-
-        rgb = color_to_triple('red')
-        self.assertEqual(len(rgb), 3)
-        self.assertEqual(rgb, (255, 0, 0))
-
-        self.assertRaises(ValueError, lambda: color_to_triple('not_a_color'))
-
     def test_albu_serialization_and_deserialization_no_lambda(self):
         x = np.random.randn(20, 20, 3)
         tf_original = A.Resize(10, 10)
@@ -303,7 +312,7 @@ class TestOtherUtils(unittest.TestCase):
         np.testing.assert_array_equal(
             tf_original(image=x)['image'], tf_deserialized(image=x)['image'])
 
-    @mock_s3
+    @mock_aws
     def test_albu_serialization_and_deserialization_lambda(self):
         x = np.random.randn(20, 20, 4)
         tf_original = lambda_transforms['ndvi']
@@ -383,6 +392,27 @@ class TestOtherUtils(unittest.TestCase):
 
     def test_log_system_details(self):
         self.assertNoError(log_system_details)
+
+    def test_get_learner_config_from_bundle_dir(self):
+        learner_cfg = LearnerConfig(solver=SolverConfig(), data=DataConfig())
+        with get_tmp_dir() as tmp_dir:
+            learner_cfg.to_file(join(tmp_dir, 'learner-config.json'))
+            cfg = get_learner_config_from_bundle_dir(tmp_dir)
+        self.assertIsInstance(cfg, LearnerConfig)
+
+    def test_get_learner_config_from_bundle_dir_backward_compatibility(self):
+        class MockLearnerPipelineConfig(PipelineConfig):
+            learner: LearnerConfig
+
+        learner_cfg = LearnerConfig(solver=SolverConfig(), data=DataConfig())
+        learner_pipeline_cfg = MockLearnerPipelineConfig(learner=learner_cfg)
+        with get_tmp_dir() as tmp_dir:
+            self.assertRaises(
+                FileNotFoundError,
+                lambda: get_learner_config_from_bundle_dir(tmp_dir))
+            learner_pipeline_cfg.to_file(join(tmp_dir, 'pipeline-config.json'))
+            cfg = get_learner_config_from_bundle_dir(tmp_dir)
+        self.assertIsInstance(cfg, LearnerConfig)
 
 
 if __name__ == '__main__':

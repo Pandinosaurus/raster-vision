@@ -1,4 +1,5 @@
-from typing import Iterable, List, Type, TYPE_CHECKING, Optional, Callable
+from typing import TYPE_CHECKING, Iterable
+from collections.abc import Callable
 import inspect
 from click import Command
 
@@ -10,7 +11,6 @@ if TYPE_CHECKING:
 
 class RegistryError(Exception):
     """Exception raised for invalid use of registry."""
-    pass
 
 
 class Registry():
@@ -28,21 +28,22 @@ class Registry():
         self.type_hint_to_lineage = {}
         self.type_hint_to_plugin = {}
         self.type_hint_to_upgrader = {}
+        self.renamed_type_hints = {}
 
     def add_plugin_command(self, cmd: Command):
         """Add a click command contributed by a plugin."""
         self.plugin_commands.append(cmd)
 
-    def get_plugin_commands(self) -> List[Command]:
+    def get_plugin_commands(self) -> list[Command]:
         """Get the click commands contributed by plugins."""
         return self.plugin_commands
 
-    def set_plugin_aliases(self, plugin: str, aliases: List[str]):
+    def set_plugin_aliases(self, plugin: str, aliases: list[str]):
         self.alias_to_plugin[plugin] = plugin
         for alias in aliases:
             self.alias_to_plugin[alias] = plugin
 
-    def get_plugin_from_alias(self, alias: str) -> Optional[str]:
+    def get_plugin_from_alias(self, alias: str) -> str | None:
         if alias in self.plugin_versions:
             return alias
         return self.alias_to_plugin.get(alias)
@@ -57,12 +58,22 @@ class Registry():
         """
         self.plugin_versions[plugin] = version
 
-    def get_type_hint_lineage(self, type_hint: str) -> List[str]:
+    def register_renamed_type_hints(self, type_hint_old: str,
+                                    type_hint_new: str):
+        """Register renamed type_hints.
+
+        Args:
+            type_hint_old: Old type hint.
+            type_hint_new: New type hint.
+        """
+        self.renamed_type_hints[type_hint_old] = type_hint_new
+
+    def get_type_hint_lineage(self, type_hint: str) -> list[str]:
         """Get the lineage for a type hint.
 
         Returns:
-            List of type hints of all Config classes in the subclass is-a "lineage" from
-            Config to the class with type hint type_hint.
+            List of type hints of all Config classes in the subclass is-a
+            "lineage" from Config to the class with type hint type_hint.
         """
         return self.type_hint_to_lineage[type_hint]
 
@@ -78,11 +89,12 @@ class Registry():
         """Get module path of plugin when Config class with type_hint is defined."""
         return self.type_hint_to_plugin[type_hint]
 
-    def get_upgrader(self, type_hint: str) -> Optional[Callable]:
+    def get_upgrader(self,
+                     type_hint: str) -> Callable[[dict, int], dict] | None:
         """Get function that upgrades config dicts for type_hint."""
         return self.type_hint_to_upgrader.get(type_hint)
 
-    def add_runner(self, runner_name: str, runner: Type['Runner']):
+    def add_runner(self, runner_name: str, runner: type['Runner']):
         """Add a Runner.
 
         Args:
@@ -95,7 +107,7 @@ class Registry():
 
         self.runners[runner_name] = runner
 
-    def get_runner(self, runner_name: str) -> Type['Runner']:  # noqa
+    def get_runner(self, runner_name: str) -> type['Runner']:  # noqa
         """Return a Runner class based on its name."""
         runner = self.runners.get(runner_name)
         if runner:
@@ -112,7 +124,7 @@ class Registry():
         self.file_systems.append(file_system)
 
     def get_file_system(self, uri: str,
-                        mode: str = 'r') -> Type['FileSystem']:  # noqa
+                        mode: str = 'r') -> type['FileSystem']:  # noqa
         """Get a FileSystem used to handle the file type of a URI.
 
         Args:
@@ -134,7 +146,7 @@ class Registry():
 
     def add_config(self,
                    type_hint: str,
-                   config: Type['Config'],
+                   config: type['Config'],
                    plugin: str,
                    upgrader=None):
         """Add a Config.
@@ -155,7 +167,7 @@ class Registry():
 
         self.update_config_info()
 
-    def get_config(self, type_hint: str) -> Type['Config']:
+    def get_config(self, type_hint: str) -> type['Config']:
         """Get a Config class associated with a type_hint."""
         config = self.configs.get(type_hint)
         if config:
@@ -168,7 +180,7 @@ class Registry():
                 'file for the plugin.')
 
     def add_rv_config_schema(self, config_section: str,
-                             config_fields: List[str]):
+                             config_fields: list[str]):
         """Add section of schema used by RVConfig.
 
         Args:
@@ -230,8 +242,7 @@ class Registry():
         ]
         return discovered_plugins
 
-    def load_plugins(self,
-                     plugin_names: Optional[Iterable[str]] = None) -> None:
+    def load_plugins(self, plugin_names: Iterable[str] | None = None) -> None:
         """Load plugins and register their resources.
 
         Import each Python module within the rastervision namespace package

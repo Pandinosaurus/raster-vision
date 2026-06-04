@@ -1,4 +1,5 @@
-from typing import Any, Callable
+from typing import Any
+from collections.abc import Callable
 import unittest
 from uuid import uuid4
 
@@ -9,12 +10,12 @@ from rastervision.core.data import (
     ClassConfig, DatasetConfig, RasterioSourceConfig, MultiRasterSourceConfig,
     ReclassTransformerConfig, SceneConfig,
     SemanticSegmentationLabelSourceConfig)
-from rastervision.core.rv_pipeline import SemanticSegmentationConfig
+from rastervision.core.rv_pipeline import (
+    SemanticSegmentationConfig, WindowSamplingConfig, WindowSamplingMethod)
 from rastervision.pytorch_backend import PyTorchSemanticSegmentationConfig
 from rastervision.pytorch_learner import (
     SemanticSegmentationModelConfig, SolverConfig,
-    SemanticSegmentationGeoDataConfig, PlotOptions, GeoDataWindowConfig,
-    GeoDataWindowMethod)
+    SemanticSegmentationGeoDataConfig, PlotOptions)
 from rastervision.pytorch_learner.utils import (
     serialize_albumentation_transform)
 from tests.data_files.lambda_transforms import lambda_transforms
@@ -101,10 +102,10 @@ class TestSemanticSegmentationLearner(unittest.TestCase):
                 aug_tf = None
             data_cfg = SemanticSegmentationGeoDataConfig(
                 scene_dataset=dataset_cfg,
-                window_opts=GeoDataWindowConfig(
-                    method=GeoDataWindowMethod.random, size=20, max_windows=8),
-                class_names=class_config.names,
-                class_colors=class_config.colors,
+                sampling=WindowSamplingConfig(
+                    method=WindowSamplingMethod.random, size=20,
+                    max_windows=8),
+                class_config=class_config,
                 aug_transform=aug_tf,
                 plot_options=PlotOptions(
                     channel_display_groups=channel_display_groups),
@@ -112,7 +113,8 @@ class TestSemanticSegmentationLearner(unittest.TestCase):
             backend_cfg = PyTorchSemanticSegmentationConfig(
                 data=data_cfg,
                 model=SemanticSegmentationModelConfig(pretrained=False),
-                solver=SolverConfig(batch_sz=4, num_epochs=1),
+                solver=SolverConfig(
+                    batch_sz=4, num_epochs=1, ignore_class_index=-1),
                 log_tensorboard=False)
             pipeline_cfg = SemanticSegmentationConfig(
                 root_uri=tmp_dir, dataset=dataset_cfg, backend=backend_cfg)
@@ -122,17 +124,10 @@ class TestSemanticSegmentationLearner(unittest.TestCase):
             learner = backend.learner_cfg.build(tmp_dir, training=True)
 
             learner.plot_dataloaders()
-            learner.train()
+            learner.train(1)
+            learner.train(1)
             learner.plot_predictions(split='valid')
             learner.save_model_bundle()
-
-            learner = None
-            backend.learner = None
-            backend.load_model()
-
-            pred_scene = dataset_cfg.validation_scenes[0].build(
-                class_config, tmp_dir)
-            _ = backend.predict_scene(pred_scene, chip_sz=100)
 
 
 if __name__ == '__main__':

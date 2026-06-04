@@ -1,17 +1,23 @@
-# flake8: noqa
-
-from typing import Optional
 import re
 import random
 import os
 from abc import abstractmethod
 
-from rastervision.pipeline.file_system import list_paths
-from rastervision.core.rv_pipeline import *
-from rastervision.core.backend import *
-from rastervision.core.data import *
-from rastervision.pytorch_backend import *
-from rastervision.pytorch_learner import *
+from rastervision.pipeline.file_system.utils import list_paths
+from rastervision.core.rv_pipeline import (
+    SemanticSegmentationConfig, SemanticSegmentationChipOptions,
+    SemanticSegmentationPredictOptions, WindowSamplingConfig,
+    WindowSamplingMethod)
+from rastervision.core.data import (
+    BufferTransformerConfig, ClassConfig, ClassInferenceTransformerConfig,
+    DatasetConfig, GeoJSONVectorSourceConfig, PolygonVectorOutputConfig,
+    RasterioSourceConfig, RasterizedSourceConfig, RasterizerConfig,
+    SceneConfig, SemanticSegmentationLabelSourceConfig,
+    SemanticSegmentationLabelStoreConfig, StatsTransformerConfig)
+from rastervision.pytorch_backend import PyTorchSemanticSegmentationConfig
+from rastervision.pytorch_learner import (
+    Backbone, SolverConfig, SemanticSegmentationGeoDataConfig,
+    SemanticSegmentationImageDataConfig, SemanticSegmentationModelConfig)
 
 BUILDINGS = 'buildings'
 ROADS = 'roads'
@@ -28,21 +34,22 @@ class SpacenetConfig(object):
         elif target.lower() == ROADS:
             return VegasRoads(raw_uri)
         else:
-            raise ValueError('{} is not a valid target.'.format(target))
+            raise ValueError(f'{target} is not a valid target.')
 
     def get_raster_source_uri(self, id):
+        filename = f'{self.raster_fn_prefix}{id}.tif'
         return os.path.join(self.raw_uri, self.base_dir, self.raster_dir,
-                            '{}{}.tif'.format(self.raster_fn_prefix, id))
+                            filename)
 
     def get_geojson_uri(self, id):
+        filename = f'{self.label_fn_prefix}{id}.geojson'
         return os.path.join(self.raw_uri, self.base_dir, self.label_dir,
-                            '{}{}.geojson'.format(self.label_fn_prefix, id))
+                            filename)
 
     def get_scene_ids(self):
         label_dir = os.path.join(self.raw_uri, self.base_dir, self.label_dir)
         label_paths = list_paths(label_dir, ext='.geojson')
-        label_re = re.compile(r'.*{}(\d+)\.geojson'.format(
-            self.label_fn_prefix))
+        label_re = re.compile(rf'.*{self.label_fn_prefix}(\d+)\.geojson')
         scene_ids = [
             label_re.match(label_path).group(1) for label_path in label_paths
         ]
@@ -68,7 +75,9 @@ class VegasRoads(SpacenetConfig):
 
     def get_class_config(self):
         return ClassConfig(
-            names=['road', 'background'], colors=['orange', 'black'])
+            names=['road', 'background'],
+            colors=['orange', 'black'],
+            null_class='background')
 
     def get_class_id_to_filter(self):
         return {0: ['has', 'highway']}
@@ -85,7 +94,9 @@ class VegasBuildings(SpacenetConfig):
 
     def get_class_config(self):
         return ClassConfig(
-            names=['building', 'background'], colors=['orange', 'black'])
+            names=['building', 'background'],
+            colors=['orange', 'black'],
+            null_class='background')
 
     def get_class_id_to_filter(self):
         return {0: ['has', 'building']}
@@ -93,17 +104,18 @@ class VegasBuildings(SpacenetConfig):
 
 def build_scene(spacenet_cfg: SpacenetConfig,
                 id: str,
-                channel_order: Optional[list] = None) -> SceneConfig:
+                channel_order: list | None = None) -> SceneConfig:
     image_uri = spacenet_cfg.get_raster_source_uri(id)
     label_uri = spacenet_cfg.get_geojson_uri(id)
 
     raster_source = RasterioSourceConfig(
-        uris=[image_uri], channel_order=channel_order)
+        uris=[image_uri],
+        channel_order=channel_order,
+        transformers=[StatsTransformerConfig()])
 
     # Set a line buffer to convert line strings to polygons.
     vector_source = GeoJSONVectorSourceConfig(
         uris=label_uri,
-        ignore_crs_field=True,
         transformers=[
             ClassInferenceTransformerConfig(default_class_id=0),
             BufferTransformerConfig(
@@ -139,14 +151,13 @@ def get_config(runner,
         raw_uri (str): Directory where the raw data resides
         root_uri (str): Directory where all the output will be written.
         target (str): "buildings" | "roads". Defaults to "buildings".
-        nochip (bool, optional): If True, read directly from the TIFF during
+        nochip (bool): If True, read directly from the TIFF during
             training instead of from pre-generated chips. The analyze and chip
             commands should not be run, if this is set to True. Defaults to
             True.
-        test (bool, optional): If True, does the following simplifications:
+        test (bool): If True, does the following simplifications:
             (1) Uses only a small subset of training and validation scenes.
-            (2) Enables test mode in the learner, which makes it use the
-                test_batch_sz and test_num_epochs, among other things.
+            (2) Trains for only 2 epochs.
             Defaults to False.
 
     Returns:
@@ -177,6 +188,8 @@ def get_config(runner,
         val_ids = val_ids[:4]
 
     channel_order = [0, 1, 2]
+    chip_sz = 325
+    img_sz = chip_sz
 
     class_config = spacenet_cfg.get_class_config()
     train_scenes = [
@@ -190,19 +203,14 @@ def get_config(runner,
         train_scenes=train_scenes,
         validation_scenes=val_scenes)
 
-    chip_sz = 325
-    img_sz = chip_sz
-
     chip_options = SemanticSegmentationChipOptions(
-        window_method=SemanticSegmentationWindowMethod.sliding, stride=chip_sz)
+        sampling=WindowSamplingConfig(
+            method=WindowSamplingMethod.sliding, size=chip_sz, stride=chip_sz))
 
     if nochip:
         data = SemanticSegmentationGeoDataConfig(
             scene_dataset=scene_dataset,
-            window_opts=GeoDataWindowConfig(
-                method=GeoDataWindowMethod.sliding,
-                size=chip_sz,
-                stride=chip_options.stride),
+            sampling=chip_options.sampling,
             img_sz=img_sz,
             num_workers=4)
     else:
@@ -212,20 +220,16 @@ def get_config(runner,
     backend = PyTorchSemanticSegmentationConfig(
         data=data,
         model=SemanticSegmentationModelConfig(backbone=Backbone.resnet50),
-        solver=SolverConfig(
-            lr=1e-4,
-            num_epochs=5,
-            test_num_epochs=2,
-            batch_sz=8,
-            one_cycle=True),
+        solver=SolverConfig(lr=1e-4, num_epochs=5, batch_sz=8, one_cycle=True),
         log_tensorboard=True,
         run_tensorboard=False,
-        test_mode=test)
+    )
+
+    predict_options = SemanticSegmentationPredictOptions(chip_sz=chip_sz)
 
     return SemanticSegmentationConfig(
         root_uri=root_uri,
         dataset=scene_dataset,
         backend=backend,
-        train_chip_sz=chip_sz,
-        predict_chip_sz=chip_sz,
-        chip_options=chip_options)
+        chip_options=chip_options,
+        predict_options=predict_options)

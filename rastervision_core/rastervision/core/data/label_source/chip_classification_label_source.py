@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING, Any, Iterable, List, Optional
+from typing import TYPE_CHECKING, Any, Iterable
 
 import geopandas as gpd
 
@@ -11,7 +11,7 @@ if TYPE_CHECKING:
                                         CRSTransformer, VectorSource)
 
 
-def infer_cells(cells: List[Box], labels_df: gpd.GeoDataFrame,
+def infer_cells(cells: list[Box], labels_df: gpd.GeoDataFrame,
                 ioa_thresh: float, use_intersection_over_cell: bool,
                 pick_min_class_id: bool,
                 background_class_id: int) -> ChipClassificationLabels:
@@ -28,20 +28,17 @@ def infer_cells(cells: List[Box], labels_df: gpd.GeoDataFrame,
     considered null or background.
 
     Args:
-        ioa_thresh: (float) the minimum IOA of a polygon and cell for that
+        ioa_thresh: the minimum IOA of a polygon and cell for that
             polygon to be a candidate for setting the class_id
-        use_intersection_over_cell: (bool) If true, then use the area of the
+        use_intersection_over_cell: If ``True``, then use the area of the
             cell as the denominator in the IOA. Otherwise, use the area of the
             polygon.
-        background_class_id: (None or int) If not None, class_id to use as the
+        background_class_id: If not ``None``, class_id to use as the
             background class; ie. the one that is used when a window contains
             no boxes.
-        pick_min_class_id: If true, the class_id for a cell is the minimum
+        pick_min_class_id: If ``True``, the class_id for a cell is the minimum
             class_id of the boxes in that cell. Otherwise, pick the class_id of
             the box covering the greatest area.
-
-    Returns:
-        ChipClassificationLabels
     """
     cells_df = gpd.GeoDataFrame(
         data={'cell_id': range(len(cells))},
@@ -93,29 +90,30 @@ def infer_cells(cells: List[Box], labels_df: gpd.GeoDataFrame,
 
 
 def read_labels(labels_df: gpd.GeoDataFrame,
-                bbox: Optional[Box] = None) -> ChipClassificationLabels:
-    """Convert GeoDataFrame to ChipClassificationLabels.
+                bbox: Box | None = None) -> ChipClassificationLabels:
+    """Convert ``GeoDataFrame`` to ``ChipClassificationLabels``.
 
-    If the GeoDataFrame already contains a grid of cells, then
-    ChipClassificationLabels can be constructed in a straightforward manner
+    If the ``GeoDataFrame`` already contains a grid of cells, then
+    ``ChipClassificationLabels`` can be constructed in a straightforward manner
     without having to infer the class of cells.
 
-    If bbox is given, only labels that intersect with it are returned.
+    If ``bbox`` is given, only labels that intersect with it are returned.
 
     Args:
         geojson: dict in normalized GeoJSON format (see VectorSource)
         bbox: Box in pixel coords
-
-    Returns:
-       ChipClassificationLabels
     """
     boxes = [Box.from_shapely(g).to_int() for g in labels_df.geometry]
     if bbox is not None:
         boxes = [b for b in boxes if b.intersects(bbox)]
     class_ids = labels_df['class_id'].astype(int)
+    if 'scores' in labels_df.columns:
+        scores = labels_df['scores']
+    else:
+        scores = [None] * len(class_ids)
     cells_to_class_id = {
-        cell: (class_id, None)
-        for cell, class_id in zip(boxes, class_ids)
+        cell: (class_id, class_scores)
+        for cell, class_id, class_scores in zip(boxes, class_ids, scores)
     }
     labels = ChipClassificationLabels(cells_to_class_id)
     return labels
@@ -135,18 +133,17 @@ class ChipClassificationLabelSource(LabelSource):
     def __init__(self,
                  label_source_config: 'ChipClassificationLabelSourceConfig',
                  vector_source: 'VectorSource',
-                 bbox: Optional[Box] = None,
+                 bbox: Box | None = None,
                  lazy: bool = False):
-        """Constructs a LabelSource for chip classification.
+        """Constructor.
 
         Args:
-            label_source_config (ChipClassificationLabelSourceConfig): Config
-                for class inference.
-            vector_source (VectorSource): Source of vector labels.
-            bbox (Optional[Box], optional): User-specified crop of the extent.
-                If None, the full extent available in the source file is used.
-            lazy (bool): If True, labels are not populated during
-                initialization. Defaults to False.
+            label_source_config: Config for class inference.
+            vector_source: Source of vector labels.
+            bbox: User-specified crop of the extent. If ``None``, the full
+                extent available in the source file is used.
+            lazy: If ``True``, labels are not populated during initialization.
+                Defaults to ``False``.
         """
         self.cfg = label_source_config
         self.vector_source = vector_source
@@ -161,8 +158,8 @@ class ChipClassificationLabelSource(LabelSource):
         if not self.lazy:
             self.populate_labels()
 
-    def populate_labels(self, cells: Optional[Iterable[Box]] = None) -> None:
-        """Populate self.labels by either reading or inferring.
+    def populate_labels(self, cells: Iterable[Box] | None = None) -> None:
+        """Populate ``self.labels`` by either reading or inferring.
 
         If cfg.infer_cells is True or specific cells are given, the labels are
         inferred. Otherwise, they are read from the geojson.
@@ -172,29 +169,49 @@ class ChipClassificationLabelSource(LabelSource):
         else:
             self.labels = read_labels(self.labels_df, bbox=self.bbox)
 
-    def infer_cells(self, cells: Optional[Iterable[Box]] = None
+    def infer_cells(self, cells: Iterable[Box] | None = None
                     ) -> ChipClassificationLabels:
-        """Infer labels for a list of cells. Only cells whose labels are not
-        already known are inferred.
+        """Infer labels for a list of cells.
+
+        Cells are assumed to be in ``bbox`` coords as opposed to global coords
+        and are converted to global coords before inference. The returned
+        labels are in global coords. Only cells whose
+        labels are not already known are inferred.
 
         Args:
-            cells (Optional[Iterable[Box]], optional): Cells whose labels are
-                to be inferred. Defaults to None.
+            cells: Cells (in ``bbox`` coords) whose labels are to be inferred.
+                If ``None``, cells are assumed to be sliding windows of size
+                and stride ``cell_sz`` (specified in
+                :class:`.ChipClassificationLabelSourceConfig`).
+                Defaults to ``None``.
 
         Returns:
-            ChipClassificationLabels: labels
+            Labels (in global coords).
+        """
+        if cells is None:
+            cell_sz = self.cfg.cell_sz
+            if cell_sz is None:
+                raise ValueError('cell_sz is not set.')
+            cells = self.extent.get_windows(cell_sz, cell_sz)
+        cells = [cell.to_global_coords(self.bbox) for cell in cells]
+        labels = self._infer_cells(cells)
+        return labels
+
+    def _infer_cells(self, cells: Iterable[Box]) -> ChipClassificationLabels:
+        """Infer labels for a list of cells.
+
+        Cells are assumed to be in global coords as opposed to ``bbox`` coords.
+        Only cells whose labels are not already known are inferred.
+
+        Args:
+            cells: Cells (in global coords) whose labels are to be inferred.
+
+        Returns:
+            Labels (in global coords).
         """
         cfg = self.cfg
-        if cells is None:
-            if cfg.cell_sz is None:
-                raise ValueError('cell_sz is not set.')
-            cells = self.extent.get_windows(cfg.cell_sz, cfg.cell_sz)
-        else:
-            cells = [cell.to_global_coords(self.bbox) for cell in cells]
-
         known_cells = [c for c in cells if c in self.labels]
         unknown_cells = [c for c in cells if c not in self.labels]
-
         labels = infer_cells(
             cells=unknown_cells,
             labels_df=self.labels_df,
@@ -202,28 +219,34 @@ class ChipClassificationLabelSource(LabelSource):
             use_intersection_over_cell=cfg.use_intersection_over_cell,
             pick_min_class_id=cfg.pick_min_class_id,
             background_class_id=cfg.background_class_id)
-
         for cell in known_cells:
             class_id = self.labels.get_cell_class_id(cell)
             labels.set_cell(cell, class_id)
-
         return labels
 
     def get_labels(self,
-                   window: Optional[Box] = None) -> ChipClassificationLabels:
+                   window: Box | None = None) -> ChipClassificationLabels:
+        """Return label for a window, inferring it if not already known.
+
+        If window is ``None``, returns all labels.
+        """
         if window is None:
             return self.labels
         window = window.to_global_coords(self.bbox)
-        return self.labels.get_singleton_labels(window)
+        if window not in self.labels:
+            self.labels += self._infer_cells(cells=[window])
+        labels = self.labels.get_singleton_labels(window)
+        return labels
 
     def __getitem__(self, key: Any) -> int:
-        """Return label for a window, inferring it if it is not already known.
-        """
+        """Return class ID for a window, inferring it if not already known."""
         if isinstance(key, Box):
             window = key
+            window = window.to_global_coords(self.bbox)
             if window not in self.labels:
-                self.labels += self.infer_cells(cells=[window])
-            return self.labels[window].class_id
+                self.labels += self._infer_cells(cells=[window])
+            class_id = self.labels[window].class_id
+            return class_id
         else:
             return super().__getitem__(key)
 

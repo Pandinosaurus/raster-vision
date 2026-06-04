@@ -3,12 +3,13 @@ import unittest
 import datetime
 
 import boto3
-from moto import mock_s3
+from moto import mock_aws
 
 from rastervision.pipeline.file_system import (
     file_to_str, str_to_file, download_if_needed, upload_or_copy, make_dir,
     get_local_path, file_exists, sync_from_dir, sync_to_dir, list_paths,
-    get_tmp_dir, NotReadableError, NotWritableError, FileSystem)
+    get_tmp_dir, uri_to_vsi_path, NotReadableError, NotWritableError,
+    FileSystem)
 
 LOREM = """ Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do
         eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut
@@ -20,7 +21,7 @@ LOREM = """ Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do
         mollit anim id est laborum.  """
 
 
-@mock_s3
+@mock_aws
 class TestMakeDir(unittest.TestCase):
     def setUp(self):
         self.lorem = LOREM
@@ -125,7 +126,7 @@ class TestGetLocalPath(unittest.TestCase):
         self.assertEqual(path, '/download_dir/http/bucket/10/25/53')
 
 
-@mock_s3
+@mock_aws
 class TestFileToStr(unittest.TestCase):
     """Test file_to_str and str_to_file."""
 
@@ -168,7 +169,7 @@ class TestFileToStr(unittest.TestCase):
             file_to_str(wrong_path)
 
 
-@mock_s3
+@mock_aws
 class TestDownloadIfNeeded(unittest.TestCase):
     """Test download_if_needed and upload_or_copy and str_to_file."""
 
@@ -221,7 +222,7 @@ class TestDownloadIfNeeded(unittest.TestCase):
             upload_or_copy(local_path, wrong_path)
 
 
-@mock_s3
+@mock_aws
 class TestS3Misc(unittest.TestCase):
     def setUp(self):
         self.lorem = LOREM
@@ -259,8 +260,8 @@ class TestS3Misc(unittest.TestCase):
 
     def test_list_paths_s3(self):
         path = os.path.join(self.tmp_dir.name, 'lorem', 'ipsum.txt')
-        s3_path = 's3://{}/xxx/lorem.txt'.format(self.bucket_name)
-        s3_directory = 's3://{}/xxx/'.format(self.bucket_name)
+        s3_path = f's3://{self.bucket_name}/xxx/lorem.txt'
+        s3_directory = f's3://{self.bucket_name}/xxx/'
         directory = os.path.dirname(path)
         make_dir(directory, check_empty=False)
 
@@ -268,6 +269,10 @@ class TestS3Misc(unittest.TestCase):
         upload_or_copy(path, s3_path)
 
         list_paths(s3_directory)
+        self.assertEqual(len(list_paths(s3_directory)), 1)
+
+        # without the trailing slash
+        list_paths(s3_directory[:-1])
         self.assertEqual(len(list_paths(s3_directory)), 1)
 
     def test_file_exists(self):
@@ -460,6 +465,16 @@ class TestHttpMisc(unittest.TestCase):
         fs = FileSystem.get_file_system(uri, 'r')
         self.assertRaises(NotWritableError,
                           lambda: fs.write_bytes(uri, bytes([0x00, 0x01])))
+
+
+class TestUtils(unittest.TestCase):
+    def test_uri_to_vsi_path(self):
+        self.assertEqual(uri_to_vsi_path('/a/b/c'), '/a/b/c')
+        self.assertEqual(uri_to_vsi_path('http://a/b/c'), '/vsicurl/a/b/c')
+        self.assertEqual(uri_to_vsi_path('https://a/b/c'), '/vsicurl/a/b/c')
+        self.assertEqual(uri_to_vsi_path('ftp://a/b/c'), '/vsicurl/a/b/c')
+        self.assertEqual(uri_to_vsi_path('s3://a/b/c'), '/vsis3/a/b/c')
+        self.assertEqual(uri_to_vsi_path('gs://a/b/c'), '/vsigs/a/b/c')
 
 
 if __name__ == '__main__':

@@ -1,12 +1,15 @@
-from typing import Optional
+from typing import TYPE_CHECKING
 
 from rastervision.core.data.vector_source import (VectorSourceConfig)
 from rastervision.core.data.label_source import (LabelSourceConfig,
                                                  ChipClassificationLabelSource)
 from rastervision.pipeline.config import (ConfigError, register_config, Field,
-                                          validator, root_validator)
+                                          field_validator, model_validator)
 from rastervision.core.data.vector_transformer import (
     ClassInferenceTransformerConfig, BufferTransformerConfig)
+
+if TYPE_CHECKING:
+    from typing import Self
 
 
 def cc_label_source_config_upgrader(cfg_dict: dict, version: int) -> dict:
@@ -25,7 +28,7 @@ class ChipClassificationLabelSourceConfig(LabelSourceConfig):
     This can be provided explicitly as a grid of cells, or a grid of cells can
     be inferred from arbitrary polygons.
     """
-    vector_source: Optional[VectorSourceConfig] = None
+    vector_source: VectorSourceConfig | None = None
     ioa_thresh: float = Field(
         0.5,
         description=
@@ -42,7 +45,7 @@ class ChipClassificationLabelSourceConfig(LabelSourceConfig):
         ('If True, the class_id for a cell is the minimum class_id of the boxes in that '
          'cell. Otherwise, pick the class_id of the box covering the greatest area.'
          ))
-    background_class_id: Optional[int] = Field(
+    background_class_id: int | None = Field(
         None,
         description=
         ('If not None, class_id to use as the background class; ie. the one that is used '
@@ -51,18 +54,19 @@ class ChipClassificationLabelSourceConfig(LabelSourceConfig):
     infer_cells: bool = Field(
         False,
         description='If True, infers a grid of cells based on the cell_sz.')
-    cell_sz: Optional[int] = Field(
+    cell_sz: int | None = Field(
         None,
         description=
         ('Size of a cell to use in pixels. If None, and this Config is part '
-         'of an RVPipeline, this field will be set from RVPipeline.train_chip_sz.'
+         'of an RVPipeline, this field will be set from RVPipeline.chip_options.'
          ))
     lazy: bool = Field(
         False,
         description='If True, labels will not be populated automatically '
         'during initialization of the label source.')
 
-    @validator('vector_source')
+    @field_validator('vector_source')
+    @classmethod
     def ensure_required_transformers(
             cls, v: VectorSourceConfig) -> VectorSourceConfig:
         """Add class-inference and buffer transformers if absent."""
@@ -84,14 +88,14 @@ class ChipClassificationLabelSourceConfig(LabelSourceConfig):
 
         return v
 
-    @root_validator(skip_on_failure=True)
-    def ensure_bg_class_id_if_inferring(cls, values: dict) -> dict:
-        infer_cells = values.get('infer_cells')
-        has_bg_class_id = values.get('background_class_id') is not None
+    @model_validator(mode='after')
+    def ensure_bg_class_id_if_inferring(self) -> 'Self':
+        infer_cells = self.infer_cells
+        has_bg_class_id = self.background_class_id is not None
         if infer_cells and not has_bg_class_id:
             raise ConfigError(
                 'background_class_id is required if infer_cells=True.')
-        return values
+        return self
 
     def build(self, class_config, crs_transformer, bbox=None,
               tmp_dir=None) -> ChipClassificationLabelSource:
@@ -107,6 +111,6 @@ class ChipClassificationLabelSourceConfig(LabelSourceConfig):
     def update(self, pipeline=None, scene=None):
         super().update(pipeline, scene)
         if self.cell_sz is None and pipeline is not None:
-            self.cell_sz = pipeline.train_chip_sz
+            self.cell_sz = pipeline.chip_options.get_chip_sz(scene.id)
         if self.vector_source is not None:
             self.vector_source.update(pipeline, scene)

@@ -1,5 +1,5 @@
 from abc import abstractmethod
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING
 
 from rastervision.pipeline.config import Config, register_config, Field
 from rastervision.core.data.vector_transformer import VectorTransformerConfig
@@ -10,7 +10,8 @@ if TYPE_CHECKING:
                                         SceneConfig, VectorSource)
 
 
-def vector_source_config_upgrader(cfg_dict: dict, version: int) -> dict:
+def vector_source_config_upgrader(cfg_dict: dict,
+                                  version: int) -> dict:  # pragma: no cover
     if version == 4:
         from rastervision.core.data.vector_transformer import (
             ClassInferenceTransformerConfig, BufferTransformerConfig)
@@ -46,7 +47,7 @@ def vector_source_config_upgrader(cfg_dict: dict, version: int) -> dict:
 class VectorSourceConfig(Config):
     """Configure a :class:`.VectorSource`."""
 
-    transformers: List[VectorTransformerConfig] = Field(
+    transformers: list[VectorTransformerConfig] = Field(
         [], description='List of VectorTransformers.')
 
     @abstractmethod
@@ -55,6 +56,6 @@ class VectorSourceConfig(Config):
         pass
 
     def update(self,
-               pipeline: Optional['RVPipelineConfig'] = None,
-               scene: Optional['SceneConfig'] = None) -> None:
+               pipeline: 'RVPipelineConfig | None' = None,
+               scene: 'SceneConfig | None' = None) -> None:
         pass

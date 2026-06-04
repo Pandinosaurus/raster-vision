@@ -1,4 +1,5 @@
-from typing import Any, Callable
+from typing import Any
+from collections.abc import Callable
 import unittest
 from os.path import join
 from uuid import uuid4
@@ -6,15 +7,19 @@ from uuid import uuid4
 import numpy as np
 
 from rastervision.pipeline.file_system import json_to_file, get_tmp_dir
+from rastervision.core.box import Box
 from rastervision.core.data import (
-    ClassConfig, DatasetConfig, RasterioSourceConfig, MultiRasterSourceConfig,
+    ClassConfig, DatasetConfig, geoms_to_geojson, pixel_to_map_coords,
+    RasterioCRSTransformer, RasterioSourceConfig, MultiRasterSourceConfig,
     ReclassTransformerConfig, SceneConfig, ChipClassificationLabelSourceConfig,
-    GeoJSONVectorSourceConfig, ClassInferenceTransformerConfig)
-from rastervision.core.rv_pipeline import ChipClassificationConfig
+    GeoJSONVectorSourceConfig)
+from rastervision.core.rv_pipeline import (ChipClassificationConfig,
+                                           ChipOptions, WindowSamplingConfig,
+                                           WindowSamplingMethod)
 from rastervision.pytorch_backend import PyTorchChipClassificationConfig
 from rastervision.pytorch_learner import (
     ClassificationModelConfig, SolverConfig, ClassificationGeoDataConfig,
-    PlotOptions, GeoDataWindowConfig, GeoDataWindowMethod)
+    PlotOptions)
 from tests import data_file_path
 
 
@@ -34,28 +39,18 @@ def make_scene(num_channels: int, num_classes: int,
     rs_cfg_img = MultiRasterSourceConfig(
         raster_sources=rs_cfgs_img, channel_order=list(range(num_channels)))
 
-    geojson = {
-        'type':
-        'FeatureCollection',
-        'features': [{
-            'properties': {
-                'class_id': np.random.randint(0, num_classes)
-            },
-            'geometry': {
-                'type': 'Point',
-                'coordinates': [np.random.sample(),
-                                np.random.sample()]
-            }
-        } for _ in range(2)]
-    }
+    geoms = [b.to_shapely() for b in Box(0, 0, 600, 600).get_windows(100, 100)]
+    props = [dict(class_id=np.random.randint(0, num_classes)) for _ in geoms]
+    geojson = geoms_to_geojson(geoms, properties=props)
+    geojson = pixel_to_map_coords(geojson,
+                                  RasterioCRSTransformer.from_uri(path))
     uri = join(tmp_dir, 'labels.json')
     json_to_file(geojson, uri)
+
     label_source_cfg = ChipClassificationLabelSourceConfig(
-        vector_source=GeoJSONVectorSourceConfig(
-            uris=uri,
-            transformers=[ClassInferenceTransformerConfig(default_class_id=0)
-                          ]),
-        background_class_id=0)
+        vector_source=GeoJSONVectorSourceConfig(uris=uri),
+        background_class_id=0,
+        use_intersection_over_cell=True)
     scene_cfg = SceneConfig(
         id=str(uuid4()),
         raster_source=rs_cfg_img,
@@ -99,22 +94,26 @@ class TestClassificationLearner(unittest.TestCase):
                     for _ in range(2)
                 ],
                 test_scenes=[])
+            sampling_cfg = WindowSamplingConfig(
+                method=WindowSamplingMethod.random, size=20, max_windows=8)
             data_cfg = ClassificationGeoDataConfig(
                 scene_dataset=dataset_cfg,
-                window_opts=GeoDataWindowConfig(
-                    method=GeoDataWindowMethod.random, size=20, max_windows=8),
-                class_names=class_config.names,
-                class_colors=class_config.colors,
+                sampling=sampling_cfg,
+                class_config=class_config,
                 plot_options=PlotOptions(
                     channel_display_groups=channel_display_groups),
                 num_workers=0)
             backend_cfg = PyTorchChipClassificationConfig(
                 data=data_cfg,
                 model=ClassificationModelConfig(pretrained=False),
-                solver=SolverConfig(batch_sz=4, num_epochs=1),
+                solver=SolverConfig(
+                    batch_sz=4, num_epochs=1, ignore_class_index=-1),
                 log_tensorboard=False)
             pipeline_cfg = ChipClassificationConfig(
-                root_uri=tmp_dir, dataset=dataset_cfg, backend=backend_cfg)
+                root_uri=tmp_dir,
+                dataset=dataset_cfg,
+                backend=backend_cfg,
+                chip_options=ChipOptions(sampling=sampling_cfg))
             pipeline_cfg.update()
             backend = backend_cfg.build(pipeline_cfg, tmp_dir)
             learner = backend.learner_cfg.build(tmp_dir, training=True)
@@ -123,14 +122,6 @@ class TestClassificationLearner(unittest.TestCase):
             learner.train()
             learner.plot_predictions(split='valid')
             learner.save_model_bundle()
-
-            learner = None
-            backend.learner = None
-            backend.load_model()
-
-            pred_scene = dataset_cfg.validation_scenes[0].build(
-                class_config, tmp_dir)
-            _ = backend.predict_scene(pred_scene, chip_sz=100)
 
 
 if __name__ == '__main__':

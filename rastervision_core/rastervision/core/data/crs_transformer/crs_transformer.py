@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Any, Optional, overload, Tuple
+from typing import Any, overload
 
 import numpy as np
 from shapely.ops import transform
@@ -16,36 +16,35 @@ class CRSTransformer(ABC):
     """
 
     def __init__(self,
-                 transform: Optional[Any] = None,
-                 image_crs: Optional[str] = None,
-                 map_crs: Optional[str] = None):
+                 transform: Any | None = None,
+                 image_crs: str | None = None,
+                 map_crs: str | None = None):
         self.transform = transform
         self.image_crs = image_crs
         self.map_crs = map_crs
 
     @overload
-    def map_to_pixel(self,
-                     inp: Tuple[float, float],
-                     bbox: Optional[Box] = None) -> Tuple[int, int]:
+    def map_to_pixel(self, inp: tuple[float, float],
+                     bbox: Box | None = None) -> tuple[int, int]:
         ...
 
     @overload
     def map_to_pixel(self,
-                     inp: Tuple['np.array', 'np.array'],
-                     bbox: Optional[Box] = None
-                     ) -> Tuple['np.array', 'np.array']:
+                     inp: tuple['np.ndarray', 'np.ndarray'],
+                     bbox: Box | None = None
+                     ) -> tuple['np.ndarray', 'np.ndarray']:
         ...
 
     @overload
-    def map_to_pixel(self, inp: Box, bbox: Optional[Box] = None) -> Box:
+    def map_to_pixel(self, inp: Box, bbox: Box | None = None) -> Box:
         ...
 
     @overload
     def map_to_pixel(self, inp: BaseGeometry,
-                     bbox: Optional[Box] = None) -> BaseGeometry:
+                     bbox: Box | None = None) -> BaseGeometry:
         ...
 
-    def map_to_pixel(self, inp, bbox: Optional[Box] = None):
+    def map_to_pixel(self, inp, bbox: Box | None = None):
         """Transform input from map to pixel coords.
 
         Args:
@@ -60,24 +59,18 @@ class CRSTransformer(ABC):
             Coordinate-transformed input in the same format.
         """
         if isinstance(inp, Box):
-            box_in = inp
-            ymin, xmin, ymax, xmax = box_in
-            xmin_tf, ymin_tf = self._map_to_pixel((xmin, ymin))
-            xmax_tf, ymax_tf = self._map_to_pixel((xmax, ymax))
-            box_out = Box(ymin_tf, xmin_tf, ymax_tf, xmax_tf)
+            box_out = self._map_to_pixel_box(inp)
             if bbox is not None:
                 box_out = box_out.to_local_coords(bbox)
             return box_out
         elif isinstance(inp, BaseGeometry):
-            geom_in = inp
-            geom_out = transform(
-                lambda x, y, z=None: self._map_to_pixel((x, y)), geom_in)
+            geom_out = self._map_to_pixel_geom(inp)
             if bbox is not None:
                 xmin, ymin = bbox.xmin, bbox.ymin
                 geom_out = translate(geom_out, xoff=-xmin, yoff=-ymin)
             return geom_out
         elif len(inp) == 2:
-            out = self._map_to_pixel(inp)
+            out = self._map_to_pixel_point(inp)
             out_x, out_y = out
             out = (np.array(out_x), np.array(out_y))
             if bbox is not None:
@@ -90,28 +83,27 @@ class CRSTransformer(ABC):
                 'Input must be 2-tuple or Box or shapely geometry.')
 
     @overload
-    def pixel_to_map(self,
-                     inp: Tuple[float, float],
-                     bbox: Optional[Box] = None) -> Tuple[float, float]:
+    def pixel_to_map(self, inp: tuple[float, float],
+                     bbox: Box | None = None) -> tuple[float, float]:
         ...
 
     @overload
     def pixel_to_map(self,
-                     inp: Tuple['np.array', 'np.array'],
-                     bbox: Optional[Box] = None
-                     ) -> Tuple['np.array', 'np.array']:
+                     inp: tuple['np.ndarray', 'np.ndarray'],
+                     bbox: Box | None = None
+                     ) -> tuple['np.ndarray', 'np.ndarray']:
         ...
 
     @overload
-    def pixel_to_map(self, inp: Box, bbox: Optional[Box] = None) -> Box:
+    def pixel_to_map(self, inp: Box, bbox: Box | None = None) -> Box:
         ...
 
     @overload
     def pixel_to_map(self, inp: BaseGeometry,
-                     bbox: Optional[Box] = None) -> BaseGeometry:
+                     bbox: Box | None = None) -> BaseGeometry:
         ...
 
-    def pixel_to_map(self, inp, bbox: Optional[Box] = None):
+    def pixel_to_map(self, inp, bbox: Box | None = None):
         """Transform input from pixel to map coords.
 
         Args:
@@ -130,25 +122,21 @@ class CRSTransformer(ABC):
             box_in = inp
             if bbox is not None:
                 box_in = box_in.to_global_coords(bbox)
-            ymin, xmin, ymax, xmax = box_in
-            xmin_tf, ymin_tf = self._pixel_to_map((xmin, ymin))
-            xmax_tf, ymax_tf = self._pixel_to_map((xmax, ymax))
-            box_out = Box(ymin_tf, xmin_tf, ymax_tf, xmax_tf)
+            box_out = self._pixel_to_map_box(box_in)
             return box_out
         elif isinstance(inp, BaseGeometry):
             geom_in = inp
             if bbox is not None:
                 xmin, ymin = bbox.xmin, bbox.ymin
                 geom_in = translate(geom_in, xoff=xmin, yoff=ymin)
-            geom_out = transform(
-                lambda x, y, z=None: self._pixel_to_map((x, y)), geom_in)
+            geom_out = self._pixel_to_map_geom(geom_in)
             return geom_out
         elif len(inp) == 2:
             if bbox is not None:
                 xmin, ymin = bbox.xmin, bbox.ymin
                 inp_x, inp_y = inp
                 inp = (inp_x + xmin, inp_y + ymin)
-            out = self._pixel_to_map(inp)
+            out = self._pixel_to_map_point(inp)
             out_x, out_y = out
             out = (np.array(out_x), np.array(out_y))
             return out
@@ -157,27 +145,87 @@ class CRSTransformer(ABC):
                 'Input must be 2-tuple or Box or shapely geometry.')
 
     @abstractmethod
-    def _map_to_pixel(self, point: Tuple[float, float]) -> Tuple[int, int]:
-        """Transform point from map to pixel coordinates.
+    def _map_to_pixel_point(self,
+                            point: tuple[float, float]) -> tuple[int, int]:
+        """Transform point(s) from map to pixel coordinates.
 
         Args:
-            map_point: (x, y) tuple in map coordinates (eg. lon/lat). x and y
-            can be single values or array-like.
+            map_point: ``(x, y)`` tuple in map coordinates (eg. lon/lat). ``x``
+                and ``y`` can be single values or array-like.
 
         Returns:
-            Tuple[int, int]: (x, y) tuple in pixel coordinates.
+            ``(x, y)`` tuple in pixel coordinates.
         """
-        pass
+
+    def _map_to_pixel_box(self, box: Box) -> Box:
+        """Transform a :class:`Box` from map to pixel coordinates.
+
+        Args:
+            box: Box to transform.
+
+        Returns:
+            Box in pixel coordinates.
+        """
+        ymin, xmin, ymax, xmax = box
+        xmin_tf, ymin_tf = self._map_to_pixel_point((xmin, ymin))
+        xmax_tf, ymax_tf = self._map_to_pixel_point((xmax, ymax))
+        pixel_box = Box(ymin_tf, xmin_tf, ymax_tf, xmax_tf)
+        return pixel_box
+
+    def _map_to_pixel_geom(self, geom: Box) -> Box:
+        """Transform a shapely geom from map to pixel coordinates.
+
+        Args:
+            geom: Geom to transform.
+
+        Returns:
+            Geom in pixel coordinates.
+        """
+        pixel_geom = transform(
+            lambda x, y, z=None: self._map_to_pixel_point((x, y)),
+            geom,
+        )
+        return pixel_geom
 
     @abstractmethod
-    def _pixel_to_map(self, point: Tuple[float, float]) -> Tuple[float, float]:
-        """Transform point from pixel to map coordinates.
+    def _pixel_to_map_point(self,
+                            point: tuple[int, int]) -> tuple[float, float]:
+        """Transform point(s) from pixel to map coordinates.
 
         Args:
-            pixel_point: (x, y) tuple in pixel coordinates. x and y can be
-            single values or array-like.
+            pixel_point: ``(x, y)`` tuple in pixel coordinates. ``x`` and ``y``
+                can be single values or array-like.
 
         Returns:
-            Tuple[float, float]: (x, y) tuple in map coordinates (eg. lon/lat).
+            ``(x, y)`` tuple in map coordinates (eg. lon/lat).
         """
-        pass
+
+    def _pixel_to_map_box(self, box: Box) -> Box:
+        """Transform a :class:`Box` from pixel to map coordinates.
+
+        Args:
+            box: Box to transform.
+
+        Returns:
+            Box in map coordinates (eg. lon/lat).
+        """
+        ymin, xmin, ymax, xmax = box
+        xmin_tf, ymin_tf = self._pixel_to_map_point((xmin, ymin))
+        xmax_tf, ymax_tf = self._pixel_to_map_point((xmax, ymax))
+        map_box = Box(ymin_tf, xmin_tf, ymax_tf, xmax_tf)
+        return map_box
+
+    def _pixel_to_map_geom(self, geom: Box) -> Box:
+        """Transform a shapely geom from pixel to map coordinates.
+
+        Args:
+            geom: Geom to transform.
+
+        Returns:
+            Geom in map coordinates.
+        """
+        map_geom = transform(
+            lambda x, y, z=None: self._pixel_to_map_point((x, y)),
+            geom,
+        )
+        return map_geom

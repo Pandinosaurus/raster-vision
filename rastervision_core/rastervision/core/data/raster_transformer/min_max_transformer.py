@@ -1,5 +1,3 @@
-from typing import List, Optional
-
 import numpy as np
 
 from rastervision.core.data.raster_transformer import RasterTransformer
@@ -8,9 +6,7 @@ from rastervision.core.data.raster_transformer import RasterTransformer
 class MinMaxTransformer(RasterTransformer):
     """Transforms chips by scaling values in each channel to span 0-255."""
 
-    def transform(self,
-                  chip: np.ndarray,
-                  channel_order: Optional[List[int]] = None) -> np.ndarray:
+    def transform(self, chip: np.ndarray) -> np.ndarray:
         c = chip.shape[-1]
         pixels = chip.reshape(-1, c)
         channel_mins = pixels.min(axis=0)
@@ -18,3 +14,6 @@ class MinMaxTransformer(RasterTransformer):
         chip_normalized = (chip - channel_mins) / (channel_maxs - channel_mins)
         chip_normalized = (255 * chip_normalized).astype(np.uint8)
         return chip_normalized
+
+    def get_out_dtype(self, in_dtype: np.dtype) -> np.dtype:
+        return np.dtype(np.uint8)

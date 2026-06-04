@@ -1,8 +1,9 @@
-from typing import TYPE_CHECKING, Any, List, Optional, Sequence, Tuple, Union
+from typing import TYPE_CHECKING, Any
 import logging
 
 import numpy as np
 from PIL import ImageColor
+from skimage.io import imsave
 
 from rastervision.core.box import Box
 
@@ -12,8 +13,7 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
-def color_to_triple(
-        color: Optional[Union[str, Sequence]] = None) -> Tuple[int, int, int]:
+def color_to_triple(color: str | None = None) -> tuple[int, int, int]:
     """Given a PIL ImageColor string, return a triple of integers
     representing the red, green, and blue values.
 
@@ -24,17 +24,11 @@ def color_to_triple(
 
     Returns:
          An triple of integers
-
     """
     if color is None:
         r, g, b = np.random.randint(0, 256, size=3).tolist()
         return r, g, b
-    elif isinstance(color, str):
-        return ImageColor.getrgb(color)
-    elif isinstance(color, (tuple, list)):
-        return color
-    else:
-        raise TypeError(f'Unsupported type: {type(color)}')
+    return ImageColor.getrgb(color)
 
 
 def color_to_integer(color: str) -> int:
@@ -47,7 +41,7 @@ def color_to_integer(color: str) -> int:
          An integer containing the packed RGB values.
 
     """
-    triple = color_to_triple(color)
+    triple = color_to_triple(color) if isinstance(color, str) else color
     r = triple[0] * (1 << 16)
     g = triple[1] * (1 << 8)
     b = triple[2] * (1 << 0)
@@ -56,7 +50,7 @@ def color_to_integer(color: str) -> int:
 
 
 def normalize_color(
-        color: Union[str, tuple, list]) -> Tuple[float, float, float]:
+        color: str | tuple | list | None) -> tuple[float, float, float]:
     """Convert color representation to a float 3-tuple with values in [0-1]."""
     if isinstance(color, str):
         color = color_to_triple(color)
@@ -86,19 +80,19 @@ def all_equal(it: list):
     return it.count(it[0]) == len(it)
 
 
-def listify_uris(uris: Union[str, List[str]]) -> List[str]:
+def listify_uris(uris: str | list[str]) -> list[str]:
     """Convert to URI to list if needed."""
     if isinstance(uris, (list, tuple)):
         pass
     elif isinstance(uris, str):
         uris = [uris]
     else:
-        raise TypeError(f'Expected str or List[str], but got {type(uris)}.')
+        raise TypeError(f'Expected str or list[str], but got {type(uris)}.')
     return uris
 
 
 def match_bboxes(raster_source: 'RasterSource',
-                 label_source: Union['LabelSource', 'LabelStore']) -> None:
+                 label_source: 'LabelSource | LabelStore') -> None:
     """Set ``label_souce`` bbox equal to ``raster_source`` bbox.
 
     Logs a warning if ``raster_source`` and ``label_source`` extents don't
@@ -106,40 +100,64 @@ def match_bboxes(raster_source: 'RasterSource',
 
     Args:
         raster_source (RasterSource): Source of imagery for a scene.
-        label_source (Union[LabelSource, LabelStore]): Source of labels for a
+        label_source (LabelSource | LabelStore): Source of labels for a
             scene. Can be a ``LabelStore``.
     """
+    from rastervision.core.data import (RasterioCRSTransformer,
+                                        SemanticSegmentationLabelSource)
     crs_tf_img = raster_source.crs_transformer
     crs_tf_label = label_source.crs_transformer
     bbox_img_map = crs_tf_img.pixel_to_map(raster_source.bbox)
+
+    # For SS, if a label file is not georeferenced but is the same size as
+    # the corresponding raster source (as is the case in the Potsdam dataset),
+    # implicitly assume that they are aligned.
+    if isinstance(label_source,
+                  SemanticSegmentationLabelSource) and isinstance(
+                      crs_tf_label, RasterioCRSTransformer):
+        if crs_tf_label.image_crs is None:
+            if raster_source.extent != label_source.extent:
+                raise ValueError(
+                    f'Label source ({label_source}) is not georeferenced and '
+                    f'has a different extent ({label_source.extent}) than the '
+                    f"corresponding raster source's ({raster_source}) extent "
+                    f'({raster_source.extent}).')
+            log.warning(
+                f'Label source ({label_source}) is not georeferenced but has '
+                f'the same extent ({label_source.extent}) as the '
+                f'corresponding raster source ({raster_source}). '
+                'Will assume they are aligned.')
+            return
+
     if label_source.bbox is not None:
         bbox_label_map = crs_tf_label.pixel_to_map(label_source.bbox)
         if not bbox_img_map.intersects(bbox_label_map):
             rs_cls = type(raster_source).__name__
             ls_cls = type(label_source).__name__
-            log.warning(f'{rs_cls} bbox ({bbox_img_map}) does '
-                        f'not intersect with {ls_cls} bbox '
-                        f'({bbox_label_map}).')
+            raise ValueError(f'{rs_cls} bbox ({bbox_img_map}) does '
+                             f'not intersect with {ls_cls} bbox '
+                             f'({bbox_label_map}).')
+
     # set LabelStore bbox to RasterSource bbox
     bbox_label_pixel = crs_tf_label.map_to_pixel(bbox_img_map)
     label_source.set_bbox(bbox_label_pixel)
 
 
-def parse_array_slices_2d(key: Union[tuple, slice],
-                          extent: Box) -> Tuple[Box, List[Optional[Any]]]:
+def parse_array_slices_2d(key: tuple | slice,
+                          extent: Box) -> tuple[Box, list[Any | None]]:
     """Parse 2D array-indexing inputs into a Box and slices."""
     return parse_array_slices_Nd(key, extent, dims=2, h_dim=0, w_dim=1)
 
 
-def parse_array_slices_Nd(key: Union[tuple, slice],
+def parse_array_slices_Nd(key: tuple | slice,
                           extent: Box,
                           dims: int = 3,
                           h_dim: int = -3,
-                          w_dim: int = -2) -> Tuple[Box, List[Optional[Any]]]:
+                          w_dim: int = -2) -> tuple[Box, list[Any | None]]:
     """Parse multi-dim array-indexing inputs into a Box and slices.
 
     Args:
-        key (Union[tuple, slice]): Input to __getitem__.
+        key (tuple | slice): Input to __getitem__.
         extent (Box): Extent of the raster/label source being indexed.
         dims (int): Total available indexable dims. Defaults to 3.
         h_dim (int): Index of height dim. Defaults to -3.
@@ -155,7 +173,7 @@ def parse_array_slices_Nd(key: Union[tuple, slice],
         NotImplementedError: If input contains negative values.
 
     Returns:
-        Tuple[Box, list]: A Box representing the h and w slices and a list
+        tuple[Box, list]: A Box representing the h and w slices and a list
             containing slices/index-values for all the dims.
     """
     if isinstance(key, slice):
@@ -240,3 +258,8 @@ def ensure_json_serializable(obj: Any) -> dict:
     if isinstance(obj, Box):
         return obj.to_dict()
     return obj
+
+
+def save_img(im_array: np.ndarray, output_path: str):
+    """Save numpy array as image file."""
+    imsave(output_path, im_array)

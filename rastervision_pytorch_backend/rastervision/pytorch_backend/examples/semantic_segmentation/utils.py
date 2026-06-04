@@ -2,7 +2,8 @@ import numpy as np
 import albumentations as A
 
 example_rgb_transform = A.Compose([
-    A.Flip(),
+    A.VerticalFlip(),
+    A.HorizontalFlip(),
     A.Transpose(),
     A.RandomRotate90(),
     A.ShiftScaleRotate(),
@@ -15,7 +16,7 @@ example_rgb_transform = A.Compose([
         A.ToSepia(),
     ]),
     A.OneOf([
-        A.RandomBrightness(),
+        A.RandomBrightnessContrast(),
         A.RandomGamma(),
     ]),
     A.OneOf([
@@ -38,7 +39,8 @@ example_rgb_transform = A.Compose([
 # not all transforms work with more than 3 channels, here are
 # some of the ones that do
 example_multiband_transform = A.Compose([
-    A.Flip(),
+    A.VerticalFlip(),
+    A.HorizontalFlip(),
     A.Transpose(),
     A.RandomRotate90(),
     A.ShiftScaleRotate(),

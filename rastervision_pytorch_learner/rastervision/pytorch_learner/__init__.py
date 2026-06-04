@@ -1,15 +1,18 @@
 # flake8: noqa
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from rastervision.pipeline import Registry
 
 
-def register_plugin(registry):
-    registry.set_plugin_version('rastervision.pytorch_learner', 4)
+def register_plugin(registry: 'Registry'):
+    registry.set_plugin_version('rastervision.pytorch_learner', 7)
+    registry.register_renamed_type_hints('geo_data_window', 'window_sampling')
 
 
 import rastervision.pipeline
 from rastervision.pytorch_learner.learner_config import *
 from rastervision.pytorch_learner.learner import *
-from rastervision.pytorch_learner.learner_pipeline_config import *
-from rastervision.pytorch_learner.learner_pipeline import *
 from rastervision.pytorch_learner.classification_learner_config import *
 from rastervision.pytorch_learner.classification_learner import *
 from rastervision.pytorch_learner.regression_learner_config import *
@@ -21,9 +24,6 @@ from rastervision.pytorch_learner.object_detection_learner import *
 from rastervision.pytorch_learner.dataset import *
 
 __all__ = [
-    # LearnerPipeline
-    LearnerPipeline.__name__,
-    LearnerPipelineConfig.__name__,
     # Learner
     Learner.__name__,
     SemanticSegmentationLearner.__name__,
@@ -39,8 +39,6 @@ __all__ = [
     # DataConfig
     DataConfig.__name__,
     GeoDataConfig.__name__,
-    GeoDataWindowConfig.__name__,
-    GeoDataWindowMethod.__name__,
     PlotOptions.__name__,
     ImageDataConfig.__name__,
     SemanticSegmentationDataConfig.__name__,
@@ -52,7 +50,6 @@ __all__ = [
     ObjectDetectionDataConfig.__name__,
     ObjectDetectionGeoDataConfig.__name__,
     ObjectDetectionImageDataConfig.__name__,
-    ObjectDetectionGeoDataWindowConfig.__name__,
     RegressionDataConfig.__name__,
     RegressionGeoDataConfig.__name__,
     RegressionImageDataConfig.__name__,

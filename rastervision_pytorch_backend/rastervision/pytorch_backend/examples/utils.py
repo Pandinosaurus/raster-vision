@@ -1,13 +1,13 @@
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 import os
 import csv
 from io import StringIO
 
+from rastervision.pipeline.file_system.utils import file_exists
 from rastervision.core.data import (RasterioSource, GeoJSONVectorSource,
                                     ClassInferenceTransformer)
 from rastervision.core.data.utils import geoms_to_geojson, crop_geotiff
 from rastervision.pipeline.file_system import (file_to_str, json_to_file)
-from rastervision.aws_s3 import S3FileSystem
 
 if TYPE_CHECKING:
     from rastervision.core.data import ClassConfig
@@ -22,13 +22,13 @@ def get_scene_info(csv_uri: str) -> list:  # pragma: no cover
 def save_image_crop(
         image_uri: str,
         image_crop_uri: str,
-        label_uri: Optional[str] = None,
-        label_crop_uri: Optional[str] = None,
+        label_uri: str | None = None,
+        label_crop_uri: str | None = None,
         size: int = 600,
         min_features: int = 10,
         vector_labels: bool = True,
         default_class_id: int = 0,
-        class_config: Optional['ClassConfig'] = None):  # pragma: no cover
+        class_config: 'ClassConfig | None' = None):  # pragma: no cover
     """Save a crop of an image to use for testing.
 
     If label_uri is set, the crop needs to cover >= min_features.
@@ -48,18 +48,17 @@ def save_image_crop(
         ValueError if cannot find a crop satisfying min_features constraint.
     """
     print(f'Saving test crop to {image_crop_uri}...')
+    if file_exists(image_crop_uri):
+        print('Already exists. Skipping.')
+        return
     old_environ = os.environ.copy()
     try:
-        request_payer = S3FileSystem.get_request_payer()
-        if request_payer == 'requester':
-            os.environ['AWS_REQUEST_PAYER'] = request_payer
         rs = RasterioSource(image_uri, allow_streaming=True)
         if label_uri and vector_labels:
             crs_tf = rs.crs_transformer
             vs = GeoJSONVectorSource(
                 uris=label_uri,
                 crs_transformer=crs_tf,
-                ignore_crs_field=True,
                 vector_transformers=[
                     ClassInferenceTransformer(
                         default_class_id=default_class_id,

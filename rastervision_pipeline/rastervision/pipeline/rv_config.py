@@ -1,9 +1,9 @@
+from typing import Any
 import os
 from tempfile import TemporaryDirectory
 from pathlib import Path
 import logging
 import json
-from typing import Optional, List, Dict
 
 from everett.manager import (ConfigManager, ConfigDictEnv, ConfigOSEnv,
                              ConfigurationMissingError)
@@ -67,6 +67,17 @@ class RVConfig:
         """Returns verbosity level for logging."""
         return self.verbosity
 
+    def get_verbosity_cli_opt(self) -> str:
+        """Returns verbosity in a form that can be passed to RV CLI cmds.
+
+        Returns:
+            str: string like "-vvv...".
+        """
+        num_vs = max(0, self.get_verbosity() - 1)
+        if num_vs == 0:
+            return ''
+        return f'-{"v" * num_vs}'
+
     def get_tmp_dir(self) -> TemporaryDirectory:
         """Return a new TemporaryDirectory object."""
         return TemporaryDirectory(dir=self.tmp_dir_root)
@@ -75,15 +86,15 @@ class RVConfig:
         """Return the root of all temp dirs."""
         return self.tmp_dir_root
 
-    def set_tmp_dir_root(self, tmp_dir_root: Optional[str] = None):
+    def set_tmp_dir_root(self, tmp_dir_root: str | None = None):
         """Set root of all temporary directories.
 
         To set the value, the following rules are used in decreasing priority:
 
-        1) the tmp_dir_root argument if it is not None
-        2) an environment variable (TMPDIR, TEMP, or TMP)
-        3) a default temporary directory which is
-        4) a directory returned by tempfile.TemporaryDirectory()
+        1) the ``tmp_dir_root`` argument if it is not ``None``
+        2) an environment variable (``TMPDIR``, ``TEMP``, or ``TMP``)
+        3) a default temporary directory which is a directory returned by
+           :class:`tempfile.TemporaryDirectory`
         """
         # Check the various possibilities in order of priority.
         env_arr = [
@@ -127,9 +138,9 @@ class RVConfig:
         return cache_dir
 
     def set_everett_config(self,
-                           profile: str = None,
-                           rv_home: str = None,
-                           config_overrides: Dict[str, str] = None):
+                           profile: str | None = None,
+                           rv_home: str | None = None,
+                           config_overrides: dict[str, str] | None = None):
         """Set Everett config.
 
         This sets up any other configuration using the Everett library.
@@ -199,12 +210,29 @@ class RVConfig:
                 'Switch to the version being run and search for Raster Vision '
                 'Configuration.'))
 
-    def get_namespace_config(self, namespace: str) -> Dict[str, str]:
+    def get_namespace_config(self, namespace: str) -> ConfigManager:
         """Get the key-val pairs associated with a namespace."""
         return self.config.with_namespace(namespace)
 
+    def get_namespace_option(self,
+                             namespace: str,
+                             key: str,
+                             default: Any | None = None,
+                             as_bool: bool = False) -> Any | None:
+        """Get the value of an option from a namespace."""
+        namespace_options = self.config.with_namespace(namespace)
+        try:
+            val: str = namespace_options(key)
+            if as_bool:
+                val = val.lower() in ('1', 'true', 'y', 'yes')
+            return val
+        except ConfigurationMissingError:
+            if as_bool:
+                return bool(default)
+            return default
+
     def get_config_dict(
-            self, rv_config_schema: Dict[str, List[str]]) -> Dict[str, str]:
+            self, rv_config_schema: dict[str, list[str]]) -> dict[str, str]:
         """Get all Everett configuration.
 
         This method is used to serialize an Everett configuration so it can be used on
@@ -221,14 +249,15 @@ class RVConfig:
         for namespace, keys in rv_config_schema.items():
             for key in keys:
                 try:
-                    config_dict[namespace + '_' + key] = \
-                        self.get_namespace_config(namespace)(key)
+                    namespace_options = self.get_namespace_config(namespace)
+                    full_key = f'{namespace}_{key}'
+                    config_dict[full_key] = namespace_options(key)
                 except ConfigurationMissingError:
                     pass
 
         return config_dict
 
-    def _discover_config_file_locations(self, profile) -> List[str]:
+    def _discover_config_file_locations(self, profile) -> list[str]:
         """Discover the location of RV config files.
 
         Args:

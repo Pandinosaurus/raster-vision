@@ -1,18 +1,22 @@
-from typing import TYPE_CHECKING, Dict, Iterator, Optional
+from typing import TYPE_CHECKING
 from os.path import join, basename
 import uuid
 
 from rastervision.pipeline.file_system import json_to_file
+from rastervision.core.data_sample import DataSample
 from rastervision.core.data.label import ObjectDetectionLabels
 from rastervision.pytorch_backend.pytorch_learner_backend import (
     PyTorchLearnerSampleWriter, PyTorchLearnerBackend)
-from rastervision.pytorch_learner.dataset import (
-    ObjectDetectionSlidingWindowGeoDataset)
+from rastervision.pytorch_backend.utils import chip_collate_fn_od
+from rastervision.pytorch_learner.utils import predict_scene_od
 
 if TYPE_CHECKING:
-    import numpy as np
-    from rastervision.core.data import Scene
-    from rastervision.core.data_sample import DataSample
+    from rastervision.core.data import DatasetConfig, Scene
+    from rastervision.core.rv_pipeline import (ChipOptions,
+                                               ObjectDetectionPredictOptions)
+    from rastervision.pytorch_learner.object_detection_utils import BoxList
+    from rastervision.pytorch_learner.object_detection_learner_config import (
+        ObjectDetectionGeoDataConfig)
 
 
 class PyTorchObjectDetectionSampleWriter(PyTorchLearnerSampleWriter):
@@ -41,18 +45,19 @@ class PyTorchObjectDetectionSampleWriter(PyTorchLearnerSampleWriter):
     def __exit__(self, type, value, traceback):
         """This writes label files in COCO format to (train|valid)/labels.json"""
         for split in ['train', 'valid']:
-            if len(self.splits[split]['images']) > 0:
-                split_dir = join(self.sample_dir, split)
-                labels_path = join(split_dir, 'labels.json')
+            if len(self.splits[split]['images']) == 0:
+                continue
+            split_dir = join(self.sample_dir, split)
+            labels_path = join(split_dir, 'labels.json')
 
-                images = self.splits[split]['images']
-                annotations = self.splits[split]['annotations']
-                coco_dict = {
-                    'images': images,
-                    'annotations': annotations,
-                    'categories': self.categories
-                }
-                json_to_file(coco_dict, labels_path)
+            images = self.splits[split]['images']
+            annotations = self.splits[split]['annotations']
+            coco_dict = {
+                'images': images,
+                'annotations': annotations,
+                'categories': self.categories
+            }
+            json_to_file(coco_dict, labels_path)
 
         super().__exit__(type, value, traceback)
 
@@ -62,17 +67,15 @@ class PyTorchObjectDetectionSampleWriter(PyTorchLearnerSampleWriter):
         (train|valid)/img/{scene_id}-{ind}.png and updates
         some COCO data structures.
         """
-        split_name = 'train' if sample.is_train else 'valid'
-
-        img_path = self.get_image_path(split_name, sample)
+        img_path = self.get_image_path(sample)
         self.write_chip(sample.chip, img_path)
-        self.update_coco_data(split_name, sample, img_path)
+        self.update_coco_data(sample, img_path)
         self.sample_ind += 1
 
-    def update_coco_data(self, split_name: str, sample: 'DataSample',
-                         img_path: str):
-        images = self.splits[split_name]['images']
-        annotations = self.splits[split_name]['annotations']
+    def update_coco_data(self, sample: 'DataSample', img_path: str):
+        split = 'default' if sample.split is None else sample.split
+        images = self.splits[split]['images']
+        annotations = self.splits[split]['annotations']
 
         images.append({
             'file_name': basename(img_path),
@@ -81,17 +84,17 @@ class PyTorchObjectDetectionSampleWriter(PyTorchLearnerSampleWriter):
             'width': sample.chip.shape[1]
         })
 
-        npboxes = sample.labels.get_npboxes()
-        npboxes = ObjectDetectionLabels.global_to_local(npboxes, sample.window)
-        for box_ind, (box, class_id) in enumerate(
-                zip(npboxes, sample.labels.get_class_ids())):
-            bbox = [box[1], box[0], box[3] - box[1], box[2] - box[0]]
-            bbox = [int(i) for i in bbox]
+        boxlist: 'BoxList' = sample.label
+        npboxes = boxlist.convert_boxes('xywh')
+        class_ids = boxlist.get_field('class_ids')
+        for i, (bbox, class_id) in enumerate(zip(npboxes, class_ids)):
+            bbox = [int(v) for v in bbox]
+            class_id = int(class_id)
             annotations.append({
-                'id': '{}-{}'.format(self.sample_ind, box_ind),
+                'id': f'{self.sample_ind}-{i}',
                 'image_id': self.sample_ind,
                 'bbox': bbox,
-                'category_id': int(class_id)
+                'category_id': class_id,
             })
 
 
@@ -101,34 +104,25 @@ class PyTorchObjectDetection(PyTorchLearnerBackend):
         return PyTorchObjectDetectionSampleWriter(
             output_uri, self.pipeline_cfg.dataset.class_config, self.tmp_dir)
 
-    def predict_scene(self,
-                      scene: 'Scene',
-                      chip_sz: int,
-                      stride: Optional[int] = None) -> ObjectDetectionLabels:
-        if stride is None:
-            stride = chip_sz
+    def chip_dataset(self,
+                     dataset: 'DatasetConfig',
+                     chip_options: 'ChipOptions',
+                     dataloader_kw: dict = {}) -> None:
+        dataloader_kw = dict(**dataloader_kw, collate_fn=chip_collate_fn_od)
+        return super().chip_dataset(dataset, chip_options, dataloader_kw)
 
+    def predict_scene(self, scene: 'Scene',
+                      predict_options: 'ObjectDetectionPredictOptions'
+                      ) -> ObjectDetectionLabels:
         if self.learner is None:
             self.load_model()
-
-        # Important to use self.learner.cfg.data instead of
-        # self.learner_cfg.data because of the updates
-        # Learner.from_model_bundle() makes to the custom transforms.
-        base_tf, _ = self.learner.cfg.data.get_data_transforms()
-        ds = ObjectDetectionSlidingWindowGeoDataset(
-            scene, size=chip_sz, stride=stride, transform=base_tf)
-
-        predictions: Iterator[Dict[str, 'np.ndarray']] = (
-            self.learner.predict_dataset(
-                ds,
-                raw_out=True,
-                numpy_out=True,
-                predict_kw=dict(out_shape=(chip_sz, chip_sz)),
-                progress_bar=True,
-                progress_bar_kw=dict(desc=f'Making predictions on {scene.id}'))
-        )
-
-        labels = ObjectDetectionLabels.from_predictions(
-            ds.windows, predictions)
-
+        labels = predict_scene_od(self.learner, scene, predict_options)
         return labels
+
+    def _make_chip_data_config(
+            self, dataset: 'DatasetConfig',
+            chip_options: 'ChipOptions') -> 'ObjectDetectionGeoDataConfig':
+        from rastervision.pytorch_learner import (ObjectDetectionGeoDataConfig)
+        data_config = ObjectDetectionGeoDataConfig(
+            scene_dataset=dataset, sampling=chip_options.sampling)
+        return data_config

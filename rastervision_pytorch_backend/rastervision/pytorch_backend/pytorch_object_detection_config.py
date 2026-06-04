@@ -9,7 +9,8 @@ from rastervision.pytorch_backend.pytorch_object_detection import (
     PyTorchObjectDetection)
 
 
-def objdet_learner_backend_config_upgrader(cfg_dict, version):
+def objdet_learner_backend_config_upgrader(cfg_dict,
+                                           version):  # pragma: no cover
     if version == 0:
         fields = {
             'augmentors': default_augmentors,
@@ -50,10 +51,10 @@ class PyTorchObjectDetectionConfig(PyTorchLearnerBackendConfig):
             data=self.data,
             model=self.model,
             solver=self.solver,
-            test_mode=self.test_mode,
             output_uri=pipeline.train_uri,
             log_tensorboard=self.log_tensorboard,
-            run_tensorboard=self.run_tensorboard)
+            run_tensorboard=self.run_tensorboard,
+            save_all_checkpoints=self.save_all_checkpoints)
         learner.update()
         return learner
 

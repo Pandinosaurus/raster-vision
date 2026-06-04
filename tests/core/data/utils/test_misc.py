@@ -1,4 +1,5 @@
-from typing import Any, Callable, Tuple
+from typing import Any
+from collections.abc import Callable
 import unittest
 from os.path import join
 import json
@@ -31,16 +32,16 @@ class TestMatchBboxes(unittest.TestCase):
         self.crs_tf = self.raster_source.crs_transformer
 
         self.bbox_ls = Box(0, 0, 12, 12)
-        geoms = [b.to_shapely() for b in self.bbox_ls.get_windows(2, 2)]
-        geoms = [self.crs_tf.pixel_to_map(g) for g in geoms]
-        properties = [dict(class_id=0) for _ in geoms]
-        geojson = geoms_to_geojson(geoms, properties)
+        geoms_pixel = [b.to_shapely() for b in self.bbox_ls.get_windows(2, 2)]
+        geoms_map = [self.crs_tf.pixel_to_map(g) for g in geoms_pixel]
+        properties = [dict(class_id=0) for _ in geoms_map]
+        geojson = geoms_to_geojson(geoms_map, properties)
         self._tmp_dir = get_tmp_dir()
         self.tmp_dir = self._tmp_dir.name
         uri = join(self.tmp_dir, 'labels.json')
         json_to_file(geojson, uri)
         self.vector_source = GeoJSONVectorSource(
-            uri, self.raster_source.crs_transformer, ignore_crs_field=True)
+            uri, self.raster_source.crs_transformer)
 
     def tearDown(self) -> None:
         self._tmp_dir.cleanup()
@@ -101,7 +102,7 @@ class TestParseArraySlices(unittest.TestCase):
             self.dims = dims
             self.bbox = bbox
 
-        def __getitem__(self, key: Any) -> Tuple[Box, list]:
+        def __getitem__(self, key: Any) -> tuple[Box, list]:
             if self.dims == 2:
                 return parse_array_slices_2d(key, self.bbox.extent)
             return parse_array_slices_Nd(key, self.bbox.extent, dims=self.dims)

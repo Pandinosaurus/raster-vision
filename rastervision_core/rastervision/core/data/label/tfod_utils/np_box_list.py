@@ -14,8 +14,6 @@
 # ==============================================================================
 """Numpy BoxList classes and functions."""
 
-from typing import List, Tuple
-
 import numpy as np
 
 
@@ -53,7 +51,7 @@ class NpBoxList(object):
         """Return number of boxes held in collections."""
         return self.data['boxes'].shape[0]
 
-    def get_extra_fields(self) -> List[str]:
+    def get_extra_fields(self) -> list[str]:
         """Return all non-box fields."""
         return [k for k in self.data.keys() if k != 'boxes']
 
@@ -102,18 +100,18 @@ class NpBoxList(object):
             raise ValueError(f'field {name} does not exist')
 
     def get_coordinates(
-            self) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+            self) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """Get corner coordinates of boxes.
 
         Returns:
-            Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]: a 4-tuple
-                of 1-d numpy arrays [y_min, x_min, y_max, x_max].
+            tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]: a 4-tuple
+            of 1-d numpy arrays [y_min, x_min, y_max, x_max].
         """
         boxes = self.get_field('boxes')
         return tuple(boxes.T)
 
     def _is_valid_boxes(self, data: np.ndarray) -> bool:
-        """Check whether data fullfills the format of N*[ymin, xmin, ymax, xmin].
+        """Check whether data fulfills the format of N*[ymin, xmin, ymax, xmin].
 
         Args:
             data (np.ndarray): Box coords as a [N, 4] numpy array.

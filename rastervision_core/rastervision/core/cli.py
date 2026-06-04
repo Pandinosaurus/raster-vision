@@ -1,8 +1,7 @@
-from typing import List, Optional
 import click
 
 from rastervision.pipeline.file_system import get_tmp_dir
-from rastervision.core.predictor import Predictor
+from rastervision.core.predictor import Predictor, ScenePredictor
 
 
 # https://stackoverflow.com/questions/48391777/nargs-equivalent-for-options-in-click
@@ -68,15 +67,38 @@ def predict(model_bundle: str,
             image_uri: str,
             label_uri: str,
             update_stats: bool = False,
-            channel_order: Optional[List[str]] = None,
-            scene_group: Optional[str] = None):
+            channel_order: list[str] | None = None,
+            scene_group: str | None = None):
     """Make predictions on the images at IMAGE_URI
     using MODEL_BUNDLE and store the prediction output at LABEL_URI.
     """
     if channel_order is not None:
-        channel_order: List[int] = [int(i) for i in channel_order]
+        channel_order: list[int] = [int(i) for i in channel_order]
 
     with get_tmp_dir() as tmp_dir:
         predictor = Predictor(model_bundle, tmp_dir, update_stats,
                               channel_order, scene_group)
         predictor.predict([image_uri], label_uri)
+
+
+@click.command(
+    'predict_scene',
+    short_help='Use a model bundle to predict on a new scene.')
+@click.argument('model_bundle_uri')
+@click.argument('scene_config_uri')
+@click.option(
+    '--predict_options_uri',
+    type=str,
+    default=None,
+    help='Optional URI to serialized Raster Vision PredictOptions config.')
+def predict_scene(model_bundle_uri: str,
+                  scene_config_uri: str,
+                  predict_options_uri: str | None = None):
+    """Use a model-bundle to make predictions on a scene.
+
+    \b
+    MODEL_BUNDLE_URI    URI to a serialized Raster Vision model-bundle.
+    SCENE_CONFIG_URI    URI to a serialized Raster Vision SceneConfig.
+    """
+    predictor = ScenePredictor(model_bundle_uri, predict_options_uri)
+    predictor.predict(scene_config_uri)

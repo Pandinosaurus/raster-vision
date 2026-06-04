@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING, Iterable, Optional, Tuple
+from typing import TYPE_CHECKING, Iterable
 
 from rastervision.pipeline.config import register_config
 from rastervision.core.evaluation.classification_evaluator_config import (
@@ -10,13 +10,11 @@ if TYPE_CHECKING:
     from rastervision.core.data import ClassConfig
 
 
-def ss_evaluator_config_upgrader(cfg_dict: dict, version: int) -> dict:
-    if version < 3:
-        try:
-            # removed in version 3
-            del cfg_dict['vector_output_uri']
-        except KeyError:
-            pass
+def ss_evaluator_config_upgrader(cfg_dict: dict,
+                                 version: int) -> dict:  # pragma: no cover
+    if version == 2:
+        # removed in version 3
+        cfg_dict.pop('vector_output_uri', None)
     return cfg_dict
 
 
@@ -27,7 +25,7 @@ class SemanticSegmentationEvaluatorConfig(ClassificationEvaluatorConfig):
 
     def build(self,
               class_config: 'ClassConfig',
-              scene_group: Optional[Tuple[str, Iterable[str]]] = None
+              scene_group: tuple[str, Iterable[str]] | None = None
               ) -> SemanticSegmentationEvaluator:
         if scene_group is None:
             output_uri = self.get_output_uri()

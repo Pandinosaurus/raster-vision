@@ -1,5 +1,4 @@
-from typing import (Any, Dict, Sequence, Tuple, Optional, Union, List,
-                    Iterable, Container)
+from typing import TYPE_CHECKING, Any, Container, Iterable, Sequence
 from os.path import basename, join, isfile
 import logging
 
@@ -7,51 +6,47 @@ import torch
 from torch import nn
 from torch.hub import _import_module
 import numpy as np
-from PIL import ImageColor
 import albumentations as A
 from albumentations.core.transforms_interface import ImageOnlyTransform
 import cv2
 import pandas as pd
-import onnxruntime as ort
 
-from rastervision.pipeline.file_system import get_tmp_dir
-from rastervision.pipeline.config import ConfigError
+from rastervision.pipeline.file_system.utils import (file_exists, file_to_json,
+                                                     get_tmp_dir)
+from rastervision.pipeline.config import (build_config, Config, ConfigError,
+                                          upgrade_config)
+
+if TYPE_CHECKING:
+    from typing import Self
+    import onnxruntime as ort
+    from rastervision.pytorch_learner import LearnerConfig
 
 log = logging.getLogger(__name__)
 
 
-def color_to_triple(color: Optional[str] = None) -> Tuple[int, int, int]:
-    """Given a PIL ImageColor string, return a triple of integers
-    representing the red, green, and blue values.
-
-    If color is None, return a random color.
-
-    Args:
-         color: A PIL ImageColor string
-
-    Returns:
-         An triple of integers
-
-    """
-    if color is None:
-        r = np.random.randint(0, 0x100)
-        g = np.random.randint(0, 0x100)
-        b = np.random.randint(0, 0x100)
-        return (r, g, b)
-    else:
-        return ImageColor.getrgb(color)
-
-
-def compute_conf_mat(out, y, num_labels):
+def compute_conf_mat(out: torch.Tensor, y: torch.Tensor,
+                     num_labels: int) -> torch.Tensor:
     labels = torch.arange(0, num_labels).to(out.device)
-    return ((out == labels[:, None]) & (y == labels[:, None, None])).sum(
+    conf_mat = ((out == labels[:, None]) & (y == labels[:, None, None])).sum(
         dim=2, dtype=torch.float32)
+    return conf_mat
 
 
-def compute_conf_mat_metrics(conf_mat, label_names, eps=1e-6):
+def compute_conf_mat_metrics(conf_mat: torch.Tensor,
+                             label_names: list[str],
+                             ignore_idx: int | None = None,
+                             eps: float = 1e-6):
     # eps is to avoid dividing by zero.
     eps = torch.tensor(eps)
     conf_mat = conf_mat.cpu()
+
+    if ignore_idx is not None:
+        keep_mask = torch.arange(len(conf_mat)) != ignore_idx
+        conf_mat = conf_mat[keep_mask, :]
+        conf_mat = conf_mat[:, keep_mask]
+        label_names = (
+            label_names[:ignore_idx] + label_names[(ignore_idx + 1):])
+
     gt_count = conf_mat.sum(dim=1)
     pred_count = conf_mat.sum(dim=0)
     total = conf_mat.sum()
@@ -71,16 +66,16 @@ def compute_conf_mat_metrics(conf_mat, label_names, eps=1e-6):
         'avg_recall': weighted_recall.item(),
         'avg_f1': weighted_f1.item()
     }
-    for ind, label in enumerate(label_names):
+    for i, label in enumerate(label_names):
         metrics.update({
-            '{}_precision'.format(label): precision[ind].item(),
-            '{}_recall'.format(label): recall[ind].item(),
-            '{}_f1'.format(label): f1[ind].item(),
+            f'{label}_precision': precision[i].item(),
+            f'{label}_recall': recall[i].item(),
+            f'{label}_f1': f1[i].item(),
         })
     return metrics
 
 
-def validate_albumentation_transform(tf_dict: Optional[dict]) -> dict:
+def validate_albumentation_transform(tf_dict: dict | None) -> dict:
     """ Validate a serialized albumentation transform by attempting to
     deserialize it.
     """
@@ -104,8 +99,8 @@ def validate_albumentation_transform(tf_dict: Optional[dict]) -> dict:
 
 def serialize_albumentation_transform(
         tf: A.BasicTransform,
-        lambda_transforms_path: Optional[str] = None,
-        dst_dir: Optional[str] = None) -> dict:
+        lambda_transforms_path: str | None = None,
+        dst_dir: str | None = None) -> dict:
     """Serialize an albumentations transform to a dict.
 
     If the transform includes a Lambda transform, a `lambda_transforms_path`
@@ -117,10 +112,10 @@ def serialize_albumentation_transform(
 
     Args:
         tf (A.BasicTransform): The transform to serialize.
-        lambda_transforms_path (Optional[str], optional): Path to a python file
+        lambda_transforms_path (str | None): Path to a python file
             that defines a dict named `lambda_transforms` as required by
             `A.from_dict()`. Defaults to None.
-        dst_dir (Optional[str], optional): Directory to copy the transforms
+        dst_dir (str | None): Directory to copy the transforms
             file to. Useful for copying the file to S3 when running on Batch.
             Defaults to None.
 
@@ -227,7 +222,6 @@ class MinMaxNormalize(ImageOnlyTransform):
             min_val=0.0,
             max_val=1.0,
             dtype=cv2.CV_32F,
-            always_apply=False,
             p=1.0,
     ):
         """Constructor.
@@ -237,7 +231,7 @@ class MinMaxNormalize(ImageOnlyTransform):
             max_val: the maximum value that output should have
             dtype: the dtype of output image
         """
-        super(MinMaxNormalize, self).__init__(always_apply, p)
+        super(MinMaxNormalize, self).__init__(p)
         self.min_val = min_val
         self.max_val = max_val
         self.dtype = dtype
@@ -273,8 +267,7 @@ class MinMaxNormalize(ImageOnlyTransform):
 
 def adjust_conv_channels(old_conv: nn.Conv2d,
                          in_channels: int,
-                         pretrained: bool = True
-                         ) -> Union[nn.Conv2d, nn.Sequential]:
+                         pretrained: bool = True) -> nn.Conv2d | nn.Sequential:
 
     if in_channels == old_conv.in_channels:
         return old_conv
@@ -317,11 +310,11 @@ def adjust_conv_channels(old_conv: nn.Conv2d,
         new_conv.weight.data[:, :in_channels] = pretrained_kernels
         return new_conv
     else:
-        raise ConfigError(f'Something went wrong.')
+        raise ConfigError('Something went wrong.')
 
 
 def plot_channel_groups(axs: Iterable,
-                        imgs: Iterable[Union[np.array, torch.Tensor]],
+                        imgs: Iterable[np.ndarray | torch.Tensor],
                         channel_groups: dict,
                         plot_title: bool = True) -> None:
     for title, ax, img in zip(channel_groups.keys(), axs, imgs):
@@ -334,7 +327,7 @@ def plot_channel_groups(axs: Iterable,
 
 def channel_groups_to_imgs(
         x: torch.Tensor,
-        channel_groups: Dict[str, Sequence[int]]) -> List[torch.Tensor]:
+        channel_groups: dict[str, Sequence[int]]) -> list[torch.Tensor]:
     imgs = []
     for title, ch_inds in channel_groups.items():
         img = x[..., ch_inds]
@@ -348,14 +341,14 @@ def channel_groups_to_imgs(
             img = torch.cat((img, third_channel), dim=-1)
         elif len(ch_inds) > 3:
             # only use the first 3 channels
-            log.warn(f'Only plotting first 3 channels of channel-group '
-                     f'{title}: {ch_inds}.')
+            log.warning(f'Only plotting first 3 channels of channel-group '
+                        f'{title}: {ch_inds}.')
             img = x[..., ch_inds[:3]]
         imgs.append(img)
     return imgs
 
 
-def log_metrics_to_csv(csv_path: str, metrics: Dict[str, Any]):
+def log_metrics_to_csv(csv_path: str, metrics: dict[str, Any]):
     """Append epoch metrics to CSV file."""
     # dict --> single-row DataFrame
     metrics_df = pd.DataFrame.from_records([metrics])
@@ -366,9 +359,9 @@ def log_metrics_to_csv(csv_path: str, metrics: Dict[str, Any]):
 
 
 def aggregate_metrics(
-        outputs: List[Dict[str, Union[float, torch.Tensor]]],
-        exclude_keys: Container[str] = set('conf_mat')) -> Dict[str, float]:
-    """Aggregate the ouput of validate_step at the end of the epoch.
+        outputs: list[dict[str, float | torch.Tensor]],
+        exclude_keys: Container[str] = set('conf_mat')) -> dict[str, float]:
+    """Aggregate the output of validate_step at the end of the epoch.
 
     Args:
         outputs: A list of outputs of Learner.validate_step().
@@ -376,7 +369,7 @@ def aggregate_metrics(
             be included in the output. Defaults to {'conf_mat'}.
 
     Returns:
-        Dict[str, float]: Dict with aggregated values.
+        dict[str, float]: Dict with aggregated values.
     """
     metrics = {}
     metric_names = outputs[0].keys()
@@ -451,28 +444,33 @@ class ONNXRuntimeAdapter:
     also outputs PyTorch Tensors.
     """
 
-    def __init__(self, ort_session: ort.InferenceSession) -> None:
+    def __init__(self, ort_session: 'ort.InferenceSession') -> None:
         """Constructor.
 
         Args:
             ort_session (ort.InferenceSession): ONNX-runtime InferenceSession.
         """
         self.ort_session = ort_session
+        inputs = ort_session.get_inputs()
+        if len(inputs) > 1:
+            return ValueError('ONNX model must only take one input.')
+        self.input_key = inputs[0].name
 
     @classmethod
-    def from_file(cls, path: str, providers: Optional[List[str]] = None
-                  ) -> 'ONNXRuntimeAdapter':
+    def from_file(cls, path: str,
+                  providers: list[str] | None = None) -> 'Self':
         """Construct from file.
 
         Args:
-            path (str): Path to a .onnx file.
-            providers (Optional[List[str]]): ONNX-runtime execution
-                providers. See onnxruntime documentation for more details.
-                Defaults to None.
+            path: Path to a .onnx file.
+            providers: ONNX-runtime execution providers. See ``onnxruntime``
+                documentation for more details. Defaults to ``None``.
 
         Returns:
             ONNXRuntimeAdapter: An ONNXRuntimeAdapter instance.
         """
+        import onnxruntime as ort
+
         if providers is None:
             providers = ort.get_available_providers()
             log.info(f'Using ONNX execution providers: {providers}')
@@ -480,10 +478,30 @@ class ONNXRuntimeAdapter:
         onnx_model = cls(ort_session)
         return onnx_model
 
-    def __call__(self, x: Union[torch.Tensor, np.ndarray]) -> torch.Tensor:
+    def __call__(self, x: torch.Tensor | np.ndarray) -> torch.Tensor:
         x = x.numpy()
-        outputs = self.ort_session.run(None, dict(x=x))
+        outputs = self.ort_session.run(None, {self.input_key: x})
         out = outputs[0]
         if isinstance(out, np.ndarray):
             out = torch.from_numpy(out)
         return out
+
+
+def get_learner_config_from_bundle_dir(
+        model_bundle_dir: str) -> 'LearnerConfig':
+    config_path = join(model_bundle_dir, 'learner-config.json')
+    if file_exists(config_path):
+        cfg = Config.from_file(config_path)
+    else:
+        # backward compatibility
+        config_path = join(model_bundle_dir, 'pipeline-config.json')
+        if not file_exists(config_path):
+            raise FileNotFoundError(
+                'Could not find a valid config file in the bundle.')
+        pipeline_cfg_dict = file_to_json(config_path)
+        cfg_dict = pipeline_cfg_dict['learner']
+        cfg_dict['plugin_versions'] = pipeline_cfg_dict['plugin_versions']
+        cfg_dict = upgrade_config(cfg_dict)
+        cfg_dict.pop('plugin_versions', None)
+        cfg = build_config(cfg_dict)
+    return cfg

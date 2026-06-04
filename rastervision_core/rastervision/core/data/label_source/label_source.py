@@ -1,5 +1,5 @@
-from typing import TYPE_CHECKING, Any, Optional
-from abc import ABC, abstractmethod, abstractproperty
+from typing import TYPE_CHECKING, Any
+from abc import ABC, abstractmethod
 
 from rastervision.core.box import Box
 from rastervision.core.data.utils import parse_array_slices_2d
@@ -18,31 +18,31 @@ class LabelSource(ABC):
     """
 
     @abstractmethod
-    def get_labels(self, window: Optional['Box'] = None) -> 'Labels':
+    def get_labels(self, window: 'Box | None' = None) -> 'Labels':
         """Return labels overlapping with window.
 
         Args:
             window: Box
 
         Returns:
-            Labels overlapping with window. If window is None,
-                returns all labels.
+            Labels overlapping with window. If window is None, returns all
+            labels.
         """
-        pass
 
     @property
     def extent(self) -> 'Box':
         """Extent of the ``LabelSource``."""
         return self.bbox.extent
 
-    @abstractproperty
+    @property
+    @abstractmethod
     def bbox(self) -> 'Box':
         """Bounding box applied to the source."""
-        pass
 
-    @abstractproperty
+    @property
+    @abstractmethod
     def crs_transformer(self) -> 'CRSTransformer':
-        pass
+        """Associated :class:`.CRSTransformer`."""
 
     @abstractmethod
     def set_bbox(self, extent: 'Box') -> None:
@@ -53,7 +53,6 @@ class LabelSource(ABC):
         Args:
             extent (Box): User-specified extent in pixel coordinates.
         """
-        pass
 
     def __getitem__(self, key: Any) -> Any:
         if isinstance(key, Box):

@@ -1,11 +1,11 @@
-from typing import (TYPE_CHECKING, Dict, Iterable, List, Optional, Tuple,
-                    Union)
+from typing import TYPE_CHECKING, Iterable
 import warnings
 
 import logging
 
 import numpy as np
 import torch
+import torch.distributed as dist
 
 from rastervision.pytorch_learner.learner import Learner
 from rastervision.pytorch_learner.object_detection_utils import (
@@ -26,7 +26,7 @@ class ObjectDetectionLearner(Learner):
     def get_visualizer_class(self):
         return ObjectDetectionVisualizer
 
-    def build_model(self, model_def_path: Optional[str] = None) -> 'nn.Module':
+    def build_model(self, model_def_path: str | None = None) -> 'nn.Module':
         """Override to pass img_sz."""
         cfg = self.cfg
         model = cfg.model.build(
@@ -34,12 +34,13 @@ class ObjectDetectionLearner(Learner):
             in_channels=cfg.data.img_channels,
             save_dir=self.modules_dir,
             hubconf_dir=model_def_path,
-            img_sz=cfg.data.img_sz)
+            img_sz=cfg.data.img_sz,
+            ddp_rank=self.ddp_local_rank)
         return model
 
     def setup_model(self,
-                    model_weights_path: Optional[str] = None,
-                    model_def_path: Optional[str] = None) -> None:
+                    model_weights_path: str | None = None,
+                    model_def_path: str | None = None) -> None:
         """Override to apply the TorchVisionODAdapter wrapper."""
         if self.model is not None:
             self.model.to(self.device)
@@ -89,6 +90,23 @@ class ObjectDetectionLearner(Learner):
             outs.extend(o['outs'])
             ys.extend(o['ys'])
         num_class_ids = len(self.cfg.data.class_names)
+
+        if self.is_ddp_process:
+            is_master = self.is_ddp_master
+            all_outs = [None] * self.ddp_world_size
+            all_ys = [None] * self.ddp_world_size
+            dist.gather_object(
+                outs,
+                object_gather_list=(all_outs if is_master else None),
+                dst=0)
+            dist.gather_object(
+                ys, object_gather_list=(all_ys if is_master else None), dst=0)
+            if not is_master:
+                return {}
+            outs = sum(all_outs, [])
+            ys = sum(all_ys, [])
+
+        log.info(f'{self.ddp_rank} at coco eval')
         coco_eval = compute_coco_eval(outs, ys, num_class_ids)
 
         metrics = {'mAP': 0.0, 'mAP50': 0.0}
@@ -100,35 +118,35 @@ class ObjectDetectionLearner(Learner):
     def predict(self,
                 x: 'Tensor',
                 raw_out: bool = False,
-                out_shape: Optional[Tuple[int, int]] = None) -> BoxList:
+                out_shape: tuple[int, int] | None = None) -> BoxList:
         """Make prediction for an image or batch of images.
 
         Args:
-            x (Tensor): Image or batch of images as a float Tensor with pixel
-                values normalized to [0, 1].
-            raw_out (bool, optional): If True, return prediction probabilities.
-                Defaults to False.
-            out_shape (Optional[Tuple[int, int]], optional): If provided,
-                boxes are resized such that they reference pixel coordinates in
-                an image of this shape. Defaults to None.
+            x: Image or batch of images as a float Tensor with pixel values
+                normalized to [0, 1].
+            raw_out: If True, return prediction probabilities.
+                Defaults to ``False``.
+            out_shape: If provided, boxes are resized such that they reference
+                pixel coordinates in an image of this shape.
+                Defaults to ``None``.
 
         Returns:
             BoxList: Predicted boxes.
         """
-        out: List[BoxList] = super().predict(x, raw_out=raw_out)
+        out: list[BoxList] = super().predict(x, raw_out=raw_out)
         out = self.postprocess_model_output(x, out, out_shape=out_shape)
         return out
 
     def predict_onnx(self,
                      x: 'Tensor',
                      raw_out: bool = False,
-                     out_shape: Optional[Tuple[int, int]] = None) -> BoxList:
-        out: List[BoxList] = super().predict(x, raw_out=raw_out)
+                     out_shape: tuple[int, int] | None = None) -> BoxList:
+        out: list[BoxList] = super().predict(x, raw_out=raw_out)
         out = self.postprocess_model_output(x, out, out_shape=out_shape)
         return out
 
     def postprocess_model_output(self, x: 'Tensor', out_batch: torch.Tensor,
-                                 out_shape: Tuple[int, int]):
+                                 out_shape: tuple[int, int]):
         if out_shape is None:
             return out_batch
         h_in, w_in = x.shape[-2:]
@@ -141,8 +159,8 @@ class ObjectDetectionLearner(Learner):
 
     def output_to_numpy(
             self, out: Iterable[BoxList]
-    ) -> Union[Dict[str, np.ndarray], List[Dict[str, np.ndarray]]]:
-        def boxlist_to_numpy(boxlist: BoxList) -> Dict[str, np.ndarray]:
+    ) -> dict[str, np.ndarray] | list[dict[str, np.ndarray]]:
+        def boxlist_to_numpy(boxlist: BoxList) -> dict[str, np.ndarray]:
             return {
                 'boxes': boxlist.convert_boxes('yxyx').numpy(),
                 'class_ids': boxlist.get_field('class_ids').numpy(),
@@ -159,8 +177,8 @@ class ObjectDetectionLearner(Learner):
 
     def export_to_onnx(self,
                        path: str,
-                       model: Optional['nn.Module'] = None,
-                       sample_input: Optional[torch.Tensor] = None,
+                       model: 'nn.Module | None' = None,
+                       sample_input: torch.Tensor | None = None,
                        **kwargs) -> None:
         if model is None and isinstance(self.model, TorchVisionODAdapter):
             model = self.model.model

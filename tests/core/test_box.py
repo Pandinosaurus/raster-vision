@@ -3,7 +3,7 @@ import unittest
 import numpy as np
 from shapely.geometry import box as ShapelyBox
 
-from rastervision.core.box import Box, BoxSizeError, RioWindow
+from rastervision.core.box import Box, BoxSizeError, RioWindow, SlidingWindows
 
 np.random.seed(1)
 
@@ -264,7 +264,7 @@ class TestBox(unittest.TestCase):
 
         extent = Box(0, 0, 100, 100)
         windows = extent.get_windows(size=10, stride=5)
-        self.assertEqual(len(windows), 20 * 20)
+        self.assertEqual(len(windows), 19 * 19)
 
         extent = Box(0, 0, 20, 20)
         windows = set(extent.get_windows(size=10, stride=10))
@@ -279,10 +279,10 @@ class TestBox(unittest.TestCase):
         extent = Box(10, 10, 20, 20)
         windows = set(extent.get_windows(size=6, stride=6))
         expected_windows = set([
-            Box.make_square(10, 10, 6),
-            Box.make_square(10, 16, 6),
-            Box.make_square(16, 10, 6),
-            Box.make_square(16, 16, 6)
+            Box(10, 10, 16, 16),
+            Box(10, 16, 16, 22),
+            Box(16, 10, 22, 16),
+            Box(16, 16, 22, 22)
         ])
         self.assertSetEqual(windows, expected_windows)
 
@@ -365,6 +365,14 @@ class TestBox(unittest.TestCase):
         msg = f'{extent!r}.get_windows({arg_str})'
         self.assertSetEqual(windows, expected_windows, msg=msg)
 
+        # default padding = (0, 0) if stride > size
+        extent = Box(0, 0, 10, 10)
+        args = dict(size=5, stride=6, pad_direction='end')
+        windows = extent.get_windows(**args)
+        arg_str = ', '.join(f'{k}={v!r}' for k, v in args.items())
+        msg = f'{extent!r}.get_windows({arg_str})'
+        self.assertEqual(len(windows), 1, msg=msg)
+
         args = dict(size=5, stride=3, padding=2, pad_direction='invalid')
         self.assertRaises(ValueError, lambda: extent.get_windows(**args))
 
@@ -386,14 +394,18 @@ class TestBox(unittest.TestCase):
         self.assertEqual(box.__repr__(), 'Box(ymin=1, xmin=2, ymax=3, xmax=4)')
 
     def test_filter_by_aoi(self):
-        windows = [Box.make_square(0, 0, 2), Box.make_square(0, 2, 2)]
-        aoi_polygons = [Box.make_square(0, 0, 3).to_shapely()]
+        windows = [Box(0, 0, 2, 2), Box(0, 2, 2, 4)]
+        aoi_polygons = [Box(0, 0, 3, 3).to_shapely()]
 
-        filt_windows = Box.filter_by_aoi(windows, aoi_polygons, within=False)
+        filt_windows, filt_inds = Box.filter_by_aoi(
+            windows, aoi_polygons, within=False)
         self.assertListEqual(filt_windows, windows)
+        self.assertListEqual(filt_inds, [0, 1])
 
-        filt_windows = Box.filter_by_aoi(windows, aoi_polygons, within=True)
-        self.assertListEqual(filt_windows, windows[0:1])
+        filt_windows, filt_inds = Box.filter_by_aoi(
+            windows, aoi_polygons, within=True)
+        self.assertListEqual(filt_windows, windows[:1])
+        self.assertListEqual(filt_inds, [0])
 
     def test_within_aoi(self):
         extent = Box(0, 0, 6, 6)
@@ -406,6 +418,15 @@ class TestBox(unittest.TestCase):
         self.assertTrue(Box.within_aoi(windows[1], aoi_polygons))
         self.assertTrue(Box.within_aoi(windows[2], aoi_polygons))
         self.assertFalse(Box.within_aoi(windows[3], aoi_polygons))
+
+    def test_intersects_aoi(self):
+        aoi_polygons = [
+            Box(0, 0, 20, 20).to_shapely(),
+        ]
+        self.assertTrue(Box.intersects_aoi(Box(10, 10, 15, 15), aoi_polygons))
+        self.assertTrue(Box.intersects_aoi(Box(10, 10, 25, 25), aoi_polygons))
+        self.assertTrue(Box.intersects_aoi(Box(20, 20, 25, 25), aoi_polygons))
+        self.assertFalse(Box.intersects_aoi(Box(21, 21, 25, 25), aoi_polygons))
 
     def test_normalize(self):
         self.assertEqual(Box(4, 3, 2, 1).normalize(), Box(2, 1, 4, 3))
@@ -425,6 +446,27 @@ class TestBox(unittest.TestCase):
 
         with self.assertRaises(NotImplementedError):
             _ = '' in Box(0, 0, 1, 1)
+
+    def test_error_on_nonfinite_inputs(self):
+        self.assertRaises(ValueError, lambda: Box(np.inf, 0, 0, 0))
+        self.assertRaises(ValueError, lambda: Box(-np.inf, 0, 0, 0))
+        self.assertRaises(ValueError, lambda: Box(np.nan, 0, 0, 0))
+
+
+class TestSlidingWindows(unittest.TestCase):
+    def test_getitem(self):
+        ws = SlidingWindows(Box(0, 0, 2, 4), size=2, stride=1, padding=0)
+        self.assertEqual(ws[0], Box(0, 0, 2, 2))
+        self.assertEqual(ws[-1], Box(0, 2, 2, 4))
+        self.assertListEqual(ws[1:], [Box(0, 1, 2, 3), Box(0, 2, 2, 4)])
+        self.assertListEqual(ws[::2], [Box(0, 0, 2, 2), Box(0, 2, 2, 4)])
+        self.assertListEqual(
+            ws[np.array([1, 0])],
+            [Box(0, 1, 2, 3), Box(0, 0, 2, 2)],
+        )
+        self.assertRaises(TypeError, lambda: ws['1':])
+        self.assertRaises(IndexError, lambda: ws[100])
+        self.assertRaises(IndexError, lambda: ws.get_by_rowcol(10, 0))
 
 
 if __name__ == '__main__':

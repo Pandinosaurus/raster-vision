@@ -1,17 +1,16 @@
-from typing import (TYPE_CHECKING, Any, Callable, Dict, Iterator, List,
-                    Optional, Tuple, Union, Type)
-from typing_extensions import Literal
+from typing import (TYPE_CHECKING, Any, Iterator, Literal)
 from abc import ABC, abstractmethod
-import os
+from collections.abc import Callable
 from os.path import join, isfile, basename, isdir
 import warnings
-import time
+from time import perf_counter
 import datetime
 import shutil
 import logging
 from subprocess import Popen
 import numbers
 from pprint import pformat
+import gc
 
 import numpy as np
 from tqdm.auto import tqdm
@@ -20,40 +19,44 @@ import torch
 from torch import Tensor
 import torch.nn as nn
 from torch.utils.tensorboard import SummaryWriter
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, DistributedSampler
+from torch.nn.parallel import DistributedDataParallel as DDP
+import torch.distributed as dist
+import torch.multiprocessing as mp
 
+from rastervision.pipeline import rv_config_ as rv_config
+from rastervision.pipeline.utils import get_env_var
 from rastervision.pipeline.file_system import (
-    sync_to_dir, json_to_file, file_to_json, make_dir, zipdir,
-    download_if_needed, download_or_copy, sync_from_dir, get_local_path, unzip,
-    str_to_file, is_local, get_tmp_dir)
+    sync_to_dir, json_to_file, make_dir, zipdir, download_if_needed,
+    download_or_copy, sync_from_dir, get_local_path, unzip, is_local,
+    get_tmp_dir)
 from rastervision.pipeline.file_system.utils import file_exists
 from rastervision.pipeline.utils import terminate_at_exit
-from rastervision.pipeline.config import (build_config, upgrade_config,
-                                          save_pipeline_config)
+from rastervision.pipeline.config import build_config
 from rastervision.pytorch_learner.utils import (
-    get_hubconf_dir_from_cfg, aggregate_metrics, log_metrics_to_csv,
-    log_system_details, ONNXRuntimeAdapter)
+    aggregate_metrics, DDPContextManager, get_hubconf_dir_from_cfg,
+    get_learner_config_from_bundle_dir, log_metrics_to_csv, log_system_details,
+    ONNXRuntimeAdapter)
 from rastervision.pytorch_learner.dataset.visualizer import Visualizer
 
 if TYPE_CHECKING:
+    from typing import Self
     from torch.optim import Optimizer
     from torch.optim.lr_scheduler import _LRScheduler
     from torch.utils.data import Dataset, Sampler
-
-    from rastervision.pytorch_learner import (LearnerConfig,
-                                              LearnerPipelineConfig)
+    from rastervision.pytorch_learner import LearnerConfig
 
 warnings.filterwarnings('ignore')
 
+CHECKPOINTS_DIRNAME = 'checkpoints'
 MODULES_DIRNAME = 'modules'
 TRANSFORMS_DIRNAME = 'custom_albumentations_transforms'
 BUNDLE_MODEL_WEIGHTS_FILENAME = 'model.pth'
 BUNDLE_MODEL_ONNX_FILENAME = 'model.onnx'
-USE_ONNX = os.getenv('RASTERVISION_USE_ONNX', 'false').lower() in ('true', '1')
 
 log = logging.getLogger(__name__)
 
-MetricDict = Dict[str, float]
+MetricDict = dict[str, float]
 
 
 class Learner(ABC):
@@ -62,95 +65,110 @@ class Learner(ABC):
     This can be subclassed to handle different computer vision tasks.
 
     The datasets, model, optimizer, and schedulers will be generated from the
-    cfg if not specified in the constructor.
+    :class:`.LearnerConfig` if not specified in the constructor.
 
-    If instantiated with training=False, the training apparatus (loss,
+    If instantiated with ``training=False``, the training apparatus (loss,
     optimizer, scheduler, logging, etc.) will not be set up and the model will
     be put into eval mode.
 
-    Note that various training and prediction methods have the side effect of
-    putting Learner.model into training or eval mode. No attempt is made to put the
-    model back into the mode it was previously in.
+    .. note::
+
+        This class supports distributed training via PyTorch DDP. If
+        instantiated as a DDP process, it will automatically read WORLD_SIZE,
+        RANK, and LOCAL_RANK environment variables. Alternatively, if
+        ``RASTERVISION_USE_DDP=YES`` (the default), and multiple GPUs are
+        detected, it will spawn DDP processes itself (one per GPU) when
+        training. DDP options that may be set via environment variables or an
+        INI file (see :ref:`raster vision config`) are:
+
+        - ``RASTERVISION_USE_DDP``: Use DDP? Default: ``YES``.
+        - ``RASTERVISION_DDP_BACKEND``: Default: ``nccl``.
+        - ``RASTERVISION_DDP_START_METHOD``: One of ``spawn``, ``fork``, or
+          ``forkserver``. Default: ``spawn``.
+
     """
 
     def __init__(self,
                  cfg: 'LearnerConfig',
-                 output_dir: Optional[str] = None,
-                 train_ds: Optional['Dataset'] = None,
-                 valid_ds: Optional['Dataset'] = None,
-                 test_ds: Optional['Dataset'] = None,
-                 model: Optional[nn.Module] = None,
-                 loss: Optional[Callable] = None,
-                 optimizer: Optional['Optimizer'] = None,
-                 epoch_scheduler: Optional['_LRScheduler'] = None,
-                 step_scheduler: Optional['_LRScheduler'] = None,
-                 tmp_dir: Optional[str] = None,
-                 model_weights_path: Optional[str] = None,
-                 model_def_path: Optional[str] = None,
-                 loss_def_path: Optional[str] = None,
+                 output_dir: str | None = None,
+                 train_ds: 'Dataset | None' = None,
+                 valid_ds: 'Dataset | None' = None,
+                 test_ds: 'Dataset | None' = None,
+                 model: nn.Module | None = None,
+                 loss: Callable[..., Tensor] | None = None,
+                 optimizer: 'Optimizer | None' = None,
+                 epoch_scheduler: '_LRScheduler | None' = None,
+                 step_scheduler: '_LRScheduler | None' = None,
+                 tmp_dir: str | None = None,
+                 model_weights_path: str | None = None,
+                 model_def_path: str | None = None,
+                 loss_def_path: str | None = None,
                  training: bool = True):
         """Constructor.
 
         Args:
-            cfg (LearnerConfig): LearnerConfig.
-            train_ds (Optional[Dataset], optional): The dataset to use for
-                training. If None, will be generated from cfg.data.
-                Defaults to None.
-            valid_ds (Optional[Dataset], optional): The dataset to use for
-                validation. If None, will be generated from cfg.data.
-                Defaults to None.
-            test_ds (Optional[Dataset], optional): The dataset to use for
-                testing. If None, will be generated from cfg.data.
-                Defaults to None.
-            model (Optional[nn.Module], optional): The model. If None,
-                will be generated from cfg.model. Defaults to None.
-            loss (Optional[Callable], optional): The loss function.
-                If None, will be generated from cfg.solver.
-                Defaults to None.
-            optimizer (Optional[Optimizer], optional): The optimizer.
-                If None, will be generated from cfg.solver.
-                Defaults to None.
-            epoch_scheduler (Optional[_LRScheduler], optional): The scheduler
-                that updates after each epoch. If None, will be generated from
-                cfg.solver. Defaults to None.
-            step_scheduler (Optional[_LRScheduler], optional): The scheduler
-                that updates after each optimizer-step. If None, will be
-                generated from cfg.solver. Defaults to None.
-            tmp_dir (Optional[str], optional): A temporary directory to use for
-                downloads etc. If None, will be auto-generated.
-                Defaults to None.
-            model_weights_path (Optional[str], optional): URI of model weights
-                to initialize the model with. Defaults to None.
-            model_def_path (Optional[str], optional): A local path to a
-                directory with a hubconf.py. If provided, the model definition
-                is imported from here. This is used when loading an external
-                model from a model-bundle. Defaults to None.
-            loss_def_path (Optional[str], optional): A local path to a
-                directory with a hubconf.py. If provided, the loss function
-                definition is imported from here. This is used when loading an
-                external loss function from a model-bundle. Defaults to None.
-            training (bool, optional): If False, the training apparatus (loss,
+            cfg: LearnerConfig.
+            train_ds: The dataset to use for training. If ``None``, will be
+                generated from ``cfg.data``. Defaults to ``None``.
+            valid_ds: The dataset to use for
+                validation. If ``None``, will be generated from ``cfg.data``.
+                Defaults to ``None``.
+            test_ds: The dataset to use for
+                testing. If ``None``, will be generated from ``cfg.data``.
+                Defaults to ``None``.
+            model: The model. If ``None``,
+                will be generated from cfg.model. Defaults to ``None``.
+            loss: The loss function. If ``None``, will be generated from
+                ``cfg.solver``. Defaults to ``None``.
+            optimizer: The optimizer. If ``None``, will be generated from
+                ``cfg.solver``. Defaults to ``None``.
+            epoch_scheduler: The scheduler that updates after each epoch.
+                If ``None``, will be generated from ``cfg.solver``.
+                Defaults to ``None``.
+            step_scheduler: The scheduler that updates after each
+                optimizer-step. If ``None``, will be generated from
+                ``cfg.solver``. Defaults to ``None``.
+            tmp_dir: A temporary directory to use for downloads etc. If
+                ``None``, will be auto-generated. Defaults to ``None``.
+            model_weights_path: URI of model weights to initialize the model
+                with. Defaults to ``None``.
+            model_def_path: A local path to a directory with a ``hubconf.py``
+                file. If provided, the model definition is imported from here.
+                This is used when loading an external model from a
+                model-bundle. Defaults to ``None``.
+            loss_def_path: A local path to a directory with a ``hubconf.py``
+                file. If provided, the loss function definition is imported
+                from here. This is used when loading an external loss function
+                from a model-bundle. Defaults to ``None``.
+            training: If ``False``, the training apparatus (loss,
                 optimizer, scheduler, logging, etc.) will not be set up and the
-                model will be put into eval mode. If True, the training
+                model will be put into eval mode. If ``True``, the training
                 apparatus will be set up and the model will be put into
-                training mode. Defaults to True.
+                training mode. Defaults to ``True``.
         """
         self.cfg = cfg
-
-        if model is None and cfg.model is None:
+        self.training = training
+        self._onnx_mode = (model_weights_path is not None
+                           and model_weights_path.lower().endswith('.onnx'))
+        if self.onnx_mode and self.training:
+            raise ValueError('Training mode is not supported for ONNX models.')
+        if model is None and cfg.model is None and not self.onnx_mode:
             raise ValueError(
-                'cfg.model can only be None if a custom model is specified.')
+                'cfg.model can only be None if a custom model is specified '
+                'or if model_weights_path is an .onnx file.')
 
         if tmp_dir is None:
             self._tmp_dir = get_tmp_dir()
             tmp_dir = self._tmp_dir.name
         self.tmp_dir = tmp_dir
-        self.device = torch.device('cuda'
-                                   if torch.cuda.is_available() else 'cpu')
 
         self.train_ds = train_ds
         self.valid_ds = valid_ds
         self.test_ds = test_ds
+
+        self.train_dl = None
+        self.valid_dl = None
+        self.test_dl = None
 
         self.model = model
         self.loss = loss
@@ -158,44 +176,80 @@ class Learner(ABC):
         self.epoch_scheduler = epoch_scheduler
         self.step_scheduler = step_scheduler
 
+        self.tb_process = None
+        self.tb_writer = None
+        self.tb_log_dir = None
+
+        self.setup_ddp_params()
+
+        if self.avoid_activating_cuda_runtime:
+            device = 'cuda'
+        else:
+            if torch.cuda.is_available():
+                device = 'cuda'
+            elif torch.backends.mps.is_available():
+                device = 'mps'
+            else:
+                device = 'cpu'
+
+        self.device = torch.device(device)
+
         # ---------------------------
         # Set URIs
         # ---------------------------
-        if output_dir is None and cfg.output_uri is None:
-            raise ValueError('output_dir or LearnerConfig.output_uri must '
-                             'be specified.')
-        if output_dir is not None and cfg.output_uri is not None:
-            log.warn('Both output_dir and LearnerConfig.output_uri specified. '
-                     'LearnerConfig.output_uri will be ignored.')
-        if output_dir is None:
-            assert cfg.output_uri is not None
-            self.output_dir = cfg.output_uri
-            self.model_bundle_uri = cfg.get_model_bundle_uri()
-        else:
-            self.output_dir = output_dir
-            self.model_bundle_uri = join(self.output_dir, 'model-bundle.zip')
+        self.output_dir = None
+        self.output_dir_local = None
+        self.model_bundle_uri = None
+        self.modules_dir = None
+        self.checkpoints_dir_local = None
 
-        if is_local(self.output_dir):
-            self.output_dir_local = self.output_dir
-            make_dir(self.output_dir_local)
-        else:
-            self.output_dir_local = get_local_path(self.output_dir, tmp_dir)
-            make_dir(self.output_dir_local, force_empty=True)
-            if training and not cfg.overfit_mode:
-                self.sync_from_cloud()
-            log.info(f'Local output dir: {self.output_dir_local}')
-            log.info(f'Remote output dir: {self.output_dir}')
+        if self.training:
+            if output_dir is None and cfg.output_uri is None:
+                raise ValueError('output_dir or LearnerConfig.output_uri must '
+                                 'be specified in training mode.')
+            if output_dir is not None and cfg.output_uri is not None:
+                log.warning(
+                    'Both output_dir and LearnerConfig.output_uri specified. '
+                    'LearnerConfig.output_uri will be ignored.')
+            if output_dir is None:
+                assert cfg.output_uri is not None
+                self.output_dir = cfg.output_uri
+                self.model_bundle_uri = cfg.get_model_bundle_uri()
+            else:
+                self.output_dir = output_dir
+                self.model_bundle_uri = join(self.output_dir,
+                                             'model-bundle.zip')
+            if is_local(self.output_dir):
+                self.output_dir_local = self.output_dir
+                make_dir(self.output_dir_local)
+            else:
+                self.output_dir_local = get_local_path(self.output_dir,
+                                                       tmp_dir)
+                make_dir(self.output_dir_local, force_empty=True)
+                if self.training:
+                    self.sync_from_cloud()
+                log.info(f'Local output dir: {self.output_dir_local}')
+                log.info(f'Remote output dir: {self.output_dir}')
 
-        self.modules_dir = join(self.output_dir, MODULES_DIRNAME)
+            self.modules_dir = join(self.output_dir, MODULES_DIRNAME)
+            self.checkpoints_dir_local = join(self.output_dir_local,
+                                              CHECKPOINTS_DIRNAME)
+            make_dir(self.checkpoints_dir_local)
+
         # ---------------------------
-        self._onnx_mode = False
-        self.setup_model(
-            model_weights_path=model_weights_path,
-            model_def_path=model_def_path)
+        self.init_model_weights_path = model_weights_path
+        self.init_model_def_path = model_def_path
+        self.init_loss_def_path = loss_def_path
 
-        if training:
+        if not self.distributed:
+            self.setup_model(
+                model_weights_path=model_weights_path,
+                model_def_path=model_def_path)
+
+        if self.training:
             self.setup_training(loss_def_path=loss_def_path)
-            self.model.train()
+            if self.model is not None:
+                self.model.train()
         else:
             if not self.onnx_mode:
                 self.model.eval()
@@ -206,13 +260,13 @@ class Learner(ABC):
             cfg.data.plot_options.channel_display_groups)
 
     @classmethod
-    def from_model_bundle(cls: Type,
+    def from_model_bundle(cls: type,
                           model_bundle_uri: str,
-                          tmp_dir: Optional[str] = None,
-                          cfg: Optional['LearnerConfig'] = None,
+                          tmp_dir: str | None = None,
+                          cfg: 'LearnerConfig | None' = None,
                           training: bool = False,
-                          use_onnx_model: bool = USE_ONNX,
-                          **kwargs) -> 'Learner':
+                          use_onnx_model: bool | None = None,
+                          **kwargs) -> 'Self':
         """Create a Learner from a model bundle.
 
         .. note::
@@ -221,19 +275,19 @@ class Learner(ABC):
             ``bundle/model-bundle.zip``.
 
         Args:
-            model_bundle_uri (str): URI of the model bundle.
-            tmp_dir (Optional[str], optional): Optional temporary directory.
+            model_bundle_uri: URI of the model bundle.
+            tmp_dir: Optional temporary directory.
                 Will be used for unzipping bundle and also passed to the
                 default constructor. If None, will be auto-generated.
                 Defaults to None.
-            cfg (Optional[LearnerConfig], optional): If None, will be read from
+            cfg: If None, will be read from
                 the bundle. Defaults to None.
-            training (bool, optional): If False, the training apparatus (loss,
+            training: If False, the training apparatus (loss,
                 optimizer, scheduler, logging, etc.) will not be set up and the
                 model will be put into eval mode. If True, the training
                 apparatus will be set up and the model will be put into
                 training mode. Defaults to True.
-            use_onnx_model (bool, optional): If True and training=False and a
+            use_onnx_model: If True and training=False and a
                 model.onnx file is available in the bundle, use that for
                 inference rather than the PyTorch weights. Defaults to the
                 boolean environment variable RASTERVISION_USE_ONNX if set,
@@ -257,14 +311,7 @@ class Learner(ABC):
         unzip(model_bundle_path, model_bundle_dir)
 
         if cfg is None:
-            config_path = join(model_bundle_dir, 'pipeline-config.json')
-
-            config_dict = file_to_json(config_path)
-            config_dict = upgrade_config(config_dict)
-
-            learner_pipeline_cfg: 'LearnerPipelineConfig' = build_config(
-                config_dict)
-            cfg = learner_pipeline_cfg.learner
+            cfg = get_learner_config_from_bundle_dir(model_bundle_dir)
 
         hub_dir = join(model_bundle_dir, MODULES_DIRNAME)
         model_def_path = None
@@ -297,6 +344,9 @@ class Learner(ABC):
             # config has been altered, so re-validate
             cfg = build_config(cfg.dict())
 
+        if use_onnx_model is None:
+            use_onnx_model = rv_config.get_namespace_option(
+                'rastervision', 'USE_ONNX', as_bool=True)
         onnx_mode = False
         if not training and use_onnx_model:
             onnx_path = join(model_bundle_dir, 'model.onnx')
@@ -341,67 +391,137 @@ class Learner(ABC):
         resume if interrupted), logs stats, plots predictions, and syncs
         results to the cloud.
         """
-        log_system_details()
-        log.info(self.cfg)
-        log.info(f'Using device: {self.device}')
-        self.log_data_stats()
-        self.run_tensorboard()
-
-        cfg = self.cfg
-        if not cfg.predict_mode:
-            self.plot_dataloaders(self.cfg.data.preview_batch_limit)
-            if cfg.overfit_mode:
-                self.overfit()
-            else:
-                self.train()
-                if cfg.save_model_bundle:
-                    self.save_model_bundle()
+        if self.distributed:
+            with self.ddp():
+                self._main()
         else:
-            self.load_checkpoint()
+            self._main()
 
+    def _main(self):
+        cfg = self.cfg
+        if not self.is_ddp_process or self.is_ddp_local_master:
+            if not self.avoid_activating_cuda_runtime:
+                log_system_details()
+            log.info(cfg)
+        log.info(f'Using device: {self.device}')
+
+        if not self.distributed:
+            self.run_tensorboard()
+
+        self.train()
+        if cfg.save_model_bundle:
+            if not self.is_ddp_process or self.is_ddp_master:
+                self.save_model_bundle()
         self.stop_tensorboard()
         if cfg.eval_train:
-            self.eval_model('train')
-        self.eval_model('valid')
-        self.sync_to_cloud()
+            self.validate('train')
+        self.validate('valid')
+        if not self.is_ddp_process or self.is_ddp_master:
+            self.sync_to_cloud()
 
     ###########################
     # Training and validation
     ###########################
-    def train(self, epochs: Optional[int] = None):
-        """Training loop that will attempt to resume training if appropriate."""
-        start_epoch = self.get_start_epoch()
+    def train(self, epochs: int | None = None):
+        """Run training loop, resuming training if appropriate"""
+        start_epoch, end_epoch = self.get_start_and_end_epochs(epochs)
 
-        if epochs is None:
-            end_epoch = self.cfg.solver.num_epochs
-        else:
-            end_epoch = start_epoch + epochs
+        if start_epoch >= end_epoch:
+            log.info('Training already completed. Skipping.')
+            return
 
         if (start_epoch > 0 and start_epoch < end_epoch):
-            log.info(f'Resuming training from epoch {start_epoch}')
+            log.info('Resuming training from epoch %d', start_epoch)
 
+        if self.is_ddp_process:  # pragma: no cover
+            self._run_train_distributed(self.ddp_rank, self.ddp_world_size,
+                                        start_epoch, end_epoch)
+        elif self.distributed:  # pragma: no cover
+            log.info('Spawning %d DDP processes', self.ddp_world_size)
+            mp.start_processes(
+                self._run_train_distributed,
+                args=(self.ddp_world_size, start_epoch, end_epoch),
+                nprocs=self.ddp_world_size,
+                join=True,
+                start_method=self.ddp_start_method)
+        else:
+            self._train(start_epoch, end_epoch)
+
+    def _train(self, start_epoch: int, end_epoch: int):  # pragma: no cover
+        """Training loop."""
         self.on_train_start()
         for epoch in range(start_epoch, end_epoch):
             log.info(f'epoch: {epoch}')
+
             train_metrics = self.train_epoch(
                 optimizer=self.opt, step_scheduler=self.step_scheduler)
+
             if self.epoch_scheduler:
                 self.epoch_scheduler.step()
+
             valid_metrics = self.validate_epoch(self.valid_dl)
+
             metrics = dict(epoch=epoch, **train_metrics, **valid_metrics)
             log.info(f'metrics:\n{pformat(metrics, sort_dicts=False)}')
 
             self.on_epoch_end(epoch, metrics)
 
+    def _train_distributed(self, start_epoch: int,
+                           end_epoch: int):  # pragma: no cover
+        """Distributed training loop."""
+        if self.is_ddp_master:
+            self.on_train_start()
+
+        train_dl = self.build_dataloader('train', distributed=True)
+        val_dl = self.build_dataloader('valid', distributed=True)
+        for epoch in range(start_epoch, end_epoch):
+            log.info(f'epoch: {epoch}')
+
+            train_dl.sampler.set_epoch(epoch)
+
+            train_metrics = self.train_epoch(
+                optimizer=self.opt,
+                step_scheduler=self.step_scheduler,
+                dataloader=train_dl)
+
+            valid_metrics = self.validate_epoch(val_dl)
+
+            if self.is_ddp_master:
+                metrics = dict(epoch=epoch, **train_metrics, **valid_metrics)
+                log.info(f'metrics:\n{pformat(metrics, sort_dicts=False)}')
+                self.on_epoch_end(epoch, metrics)
+
+            if self.epoch_scheduler:
+                self.epoch_scheduler.step()
+
+            dist.barrier()
+
+    def _run_train_distributed(self, rank: int, world_size: int,
+                               *args):  # pragma: no cover
+        """Method executed by each DDP worker."""
+        with self.ddp(rank, world_size):
+            self.setup_model(
+                model_weights_path=self.init_model_weights_path,
+                model_def_path=self.init_model_def_path)
+            self.setup_training(self.init_loss_def_path)
+            self._train_distributed(*args)
+
     def train_epoch(
             self,
             optimizer: 'Optimizer',
-            step_scheduler: Optional['_LRScheduler'] = None) -> MetricDict:
+            dataloader: DataLoader | None = None,
+            step_scheduler: '_LRScheduler | None' = None) -> MetricDict:
         """Train for a single epoch."""
-        start = time.time()
         self.model.train()
+        if dataloader is None:
+            dataloader = self.train_dl
+        start = perf_counter()
         outputs = []
-        with tqdm(self.train_dl, desc='Training') as bar:
+        if self.ddp_rank is not None:
+            desc = f'Training (GPU={self.ddp_rank})'
+        else:
+            desc = 'Training'
+        with tqdm(self.train_dl, desc=desc) as bar:
             for batch_ind, (x, y) in enumerate(bar):
                 x = self.to_device(x, self.device)
                 y = self.to_device(y, self.device)
@@ -419,7 +539,7 @@ class Learner(ABC):
         if len(outputs) == 0:
             raise ValueError('Training dataset did not return any batches')
         metrics = self.train_end(outputs)
-        end = time.time()
+        end = perf_counter()
         train_time = datetime.timedelta(seconds=end - start)
         metrics['train_time'] = str(train_time)
         return metrics
@@ -435,23 +555,43 @@ class Learner(ABC):
         Returns:
             dict with 'train_loss' as key and possibly other losses
         """
-        pass
 
     def on_train_start(self):
         """Hook that is called at start of train routine."""
-        pass
+        self.log_data_stats()
+        self.plot_dataloaders(self.cfg.data.preview_batch_limit)
 
-    def train_end(self, outputs: List[Dict[str, Union[float, Tensor]]]
-                  ) -> MetricDict:
-        """Aggregate the ouput of train_step at the end of the epoch.
+    def train_end(self,
+                  outputs: list[dict[str, float | Tensor]]) -> MetricDict:
+        """Aggregate the output of train_step at the end of the epoch.
 
         Args:
             outputs: a list of outputs of train_step
         """
-        return aggregate_metrics(outputs)
+        metrics = aggregate_metrics(outputs)
+        if self.is_ddp_process:
+            metrics = self.reduce_distributed_metrics(metrics)
+        return metrics
 
-    def eval_model(self, split: str):
-        """Evaluate model using a particular dataset split.
+    def validate(self, split: Literal['train', 'valid', 'test'] = 'valid'):
+        """Evaluate model on a particular data split."""
+        if self.is_ddp_process:  # pragma: no cover
+            self._run_validate_distributed(self.ddp_rank, self.ddp_world_size,
+                                           split)
+        elif self.distributed:  # pragma: no cover
+            log.info('Spawning DDP processes')
+            mp.start_processes(
+                self._run_validate_distributed,
+                args=(self.ddp_world_size, split),
+                nprocs=self.ddp_world_size,
+                join=True,
+                start_method=self.ddp_start_method)
+        else:
+            self._validate(split)
+
+    def _validate(self, split: Literal['train', 'valid', 'test'] = 'valid'
+                  ):  # pragma: no cover
+        """Evaluate model on a particular data split.
 
         Gets validation metrics and saves them along with prediction plots.
 
@@ -460,26 +600,45 @@ class Learner(ABC):
         """
         log.info(f'Evaluating on {split} set...')
         dl = self.get_dataloader(split)
+        if dl is None:
+            self.setup_data()
+        dl = self.get_dataloader(split)
         metrics = self.validate_epoch(dl)
+        if self.is_ddp_process and not self.is_ddp_master:
+            return
         log.info(f'metrics: {metrics}')
         json_to_file(metrics,
                      join(self.output_dir_local, f'{split}_metrics.json'))
         self.plot_predictions(split, self.cfg.data.preview_batch_limit)
 
+    def _run_validate_distributed(self, rank: int, world_size: int,
+                                  *args):  # pragma: no cover
+        """Method executed by each DDP worker."""
+        with self.ddp(rank, world_size):
+            self.setup_model(
+                model_weights_path=self.init_model_weights_path,
+                model_def_path=self.init_model_def_path)
+            self.setup_training(self.init_loss_def_path)
+            self._validate(*args)
+
     def validate_epoch(self, dl: DataLoader) -> MetricDict:
         """Validate for a single epoch."""
-        start = time.time()
+        start = perf_counter()
         self.model.eval()
         outputs = []
+        if self.ddp_rank is not None:
+            desc = f'Validating (GPU={self.ddp_rank})'
+        else:
+            desc = 'Validating'
         with torch.inference_mode():
-            with tqdm(dl, desc='Validating') as bar:
+            with tqdm(dl, desc=desc) as bar:
                 for batch_ind, (x, y) in enumerate(bar):
                     x = self.to_device(x, self.device)
                     y = self.to_device(y, self.device)
                     batch = (x, y)
                     output = self.validate_step(batch, batch_ind)
                     outputs.append(output)
-        end = time.time()
+        end = perf_counter()
         validate_time = datetime.timedelta(seconds=end - start)
 
         metrics = self.validate_end(outputs)
@@ -497,16 +656,18 @@ class Learner(ABC):
         Returns:
             dict with metric names mapped to metric values
         """
-        pass
 
-    def validate_end(self, outputs: List[Dict[str, Union[float, Tensor]]]
-                     ) -> MetricDict:
-        """Aggregate the ouput of validate_step at the end of the epoch.
+    def validate_end(self,
+                     outputs: list[dict[str, float | Tensor]]) -> MetricDict:
+        """Aggregate the output of validate_step at the end of the epoch.
 
         Args:
             outputs: a list of outputs of validate_step
         """
-        return aggregate_metrics(outputs)
+        metrics = aggregate_metrics(outputs)
+        if self.is_ddp_process:
+            metrics = self.reduce_distributed_metrics(metrics)
+        return metrics
 
     def on_epoch_end(self, curr_epoch: int, metrics: MetricDict) -> None:
         """Hook that is called at end of epoch.
@@ -521,36 +682,15 @@ class Learner(ABC):
                     self.tb_writer.add_scalar(key, val, curr_epoch)
             self.tb_writer.flush()
 
-        torch.save(self.model.state_dict(), self.last_model_weights_path)
+        if self.cfg.save_all_checkpoints and curr_epoch > 0:
+            checkpoint_name = f'model-ckpt-epoch-{curr_epoch - 1}.pth'
+            checkpoint_path = join(self.checkpoints_dir_local, checkpoint_name)
+            shutil.move(self.last_model_weights_path, checkpoint_path)
+
+        self.save_weights(self.last_model_weights_path)
 
         if (curr_epoch + 1) % self.cfg.solver.sync_interval == 0:
             self.sync_to_cloud()
-
-    def overfit(self):
-        """Optimize model using the same batch repeatedly."""
-        self.on_overfit_start()
-
-        x, y = next(iter(self.train_dl))
-        x = self.to_device(x, self.device)
-        y = self.to_device(y, self.device)
-        batch = (x, y)
-
-        num_steps = self.cfg.solver.overfit_num_steps
-        with tqdm(range(num_steps), desc='Overfitting') as bar:
-            for step in bar:
-                loss = self.train_step(batch, step)['train_loss']
-                loss.backward()
-                self.opt.step()
-
-                if (step + 1) % 25 == 0:
-                    log.info('\nstep: {}'.format(step))
-                    log.info('train_loss: {}'.format(loss))
-
-        torch.save(self.model.state_dict(), self.last_model_weights_path)
-
-    def on_overfit_start(self):
-        """Hook that is called at start of overfit routine."""
-        pass
 
     ########################
     # Prediction/inference
@@ -564,8 +704,8 @@ class Learner(ABC):
             raw_out (bool): if True, return prediction probabilities
 
         Returns:
-            the predictions, in probability form if raw_out is True, in class_id form
-                otherwise
+            The predictions, in probability form if raw_out is True, in
+            class_id form otherwise.
         """
         x = self.to_batch(x).float()
         x = self.to_device(x, self.device)
@@ -592,27 +732,27 @@ class Learner(ABC):
                         dataloader_kw: dict = {},
                         progress_bar: bool = True,
                         progress_bar_kw: dict = {}
-                        ) -> Union[Iterator[Any], Iterator[Tuple[Any, ...]]]:
+                        ) -> Iterator[Any] | Iterator[tuple[Any, ...]]:
         """Returns an iterator over predictions on the given dataset.
 
         Args:
             dataset (Dataset): The dataset to make predictions on.
-            return_format (Literal['xyz', 'yz', 'z'], optional): Format of the
+            return_format (Literal['xyz', 'yz', 'z']): Format of the
                 return elements of the returned iterator. Must be one of:
                 'xyz', 'yz', and 'z'. If 'xyz', elements are 3-tuples of x, y,
                 and z. If 'yz', elements are 2-tuples of y and z. If 'z',
                 elements are (non-tuple) values of z. Where x = input image,
                 y = ground truth, and z = prediction. Defaults to 'z'.
-            raw_out (bool, optional): If true, return raw predicted scores.
+            raw_out (bool): If true, return raw predicted scores.
                 Defaults to True.
-            numpy_out (bool, optional): If True, convert predictions to numpy
+            numpy_out (bool): If True, convert predictions to numpy
                 arrays before returning. Defaults to False.
             predict_kw (dict): Dict with keywords passed to Learner.predict().
                 Useful if a Learner subclass implements a custom predict()
                 method.
             dataloader_kw (dict): Dict with keywords passed to the DataLoader
                 constructor.
-            progress_bar (bool, optional): If True, display a progress bar.
+            progress_bar (bool): If True, display a progress bar.
                 Since this function returns an iterator, the progress bar won't
                 be visible until the iterator is consumed. Defaults to True.
             progress_bar_kw (dict): Dict with keywords passed to tqdm.
@@ -621,19 +761,25 @@ class Learner(ABC):
             ValueError: If return_format is not one of the allowed values.
 
         Returns:
-            Union[Iterator[Any], Iterator[Tuple[Any, ...]]]: If return_format
-                is 'z', the returned value is an iterator of whatever type the
-                predictions are. Otherwise, the returned value is an iterator
-                of tuples.
+            If return_format is 'z', the returned value is an iterator of
+            whatever type the predictions are. Otherwise, the returned value is
+            an iterator of tuples.
         """
 
         if return_format not in {'xyz', 'yz', 'z'}:
             raise ValueError('return_format must be one of "xyz", "yz", "z".')
 
+        cfg = self.cfg
+
+        num_workers = rv_config.get_namespace_option(
+            'rastervision',
+            'PREDICT_NUM_WORKERS',
+            default=cfg.data.num_workers)
+
         dl_kw = dict(
             collate_fn=self.get_collate_fn(),
-            batch_size=self.cfg.solver.batch_sz,
-            num_workers=self.cfg.data.num_workers,
+            batch_size=cfg.solver.batch_sz if cfg.solver else 1,
+            num_workers=int(num_workers),
             shuffle=False,
             pin_memory=True)
         dl_kw.update(dataloader_kw)
@@ -660,28 +806,27 @@ class Learner(ABC):
 
         return preds
 
-    def predict_dataloader(
-            self,
-            dl: DataLoader,
-            batched_output: bool = True,
-            return_format: Literal['xyz', 'yz', 'z'] = 'z',
-            raw_out: bool = True,
-            predict_kw: dict = {}
-    ) -> Union[Iterator[Any], Iterator[Tuple[Any, ...]]]:
+    def predict_dataloader(self,
+                           dl: DataLoader,
+                           batched_output: bool = True,
+                           return_format: Literal['xyz', 'yz', 'z'] = 'z',
+                           raw_out: bool = True,
+                           predict_kw: dict = {}
+                           ) -> Iterator[Any] | Iterator[tuple[Any, ...]]:
         """Returns an iterator over predictions on the given dataloader.
 
         Args:
             dl (DataLoader): The dataloader to make predictions on.
-            batched_output (bool, optional): If True, return batches of
+            batched_output (bool): If True, return batches of
                 x, y, z as defined by the dataloader. If False, unroll the
                 batches into individual items. Defaults to True.
-            return_format (Literal['xyz', 'yz', 'z'], optional): Format of the
+            return_format (Literal['xyz', 'yz', 'z']): Format of the
                 return elements of the returned iterator. Must be one of:
                 'xyz', 'yz', and 'z'. If 'xyz', elements are 3-tuples of x, y,
                 and z. If 'yz', elements are 2-tuples of y and z. If 'z',
                 elements are (non-tuple) values of z. Where x = input image,
                 y = ground truth, and z = prediction. Defaults to 'z'.
-            raw_out (bool, optional): If true, return raw predicted scores.
+            raw_out (bool): If true, return raw predicted scores.
                 Defaults to True.
             predict_kw (dict): Dict with keywords passed to Learner.predict().
                 Useful if a Learner subclass implements a custom predict()
@@ -691,10 +836,9 @@ class Learner(ABC):
             ValueError: If return_format is not one of the allowed values.
 
         Returns:
-            Union[Iterator[Any], Iterator[Tuple[Any, ...]]]: If return_format
-                is 'z', the returned value is an iterator of whatever type the
-                predictions are. Otherwise, the returned value is an iterator
-                of tuples.
+            If ``return_format`` is ``'z'``, the returned value is an iterator
+            of whatever type the predictions are. Otherwise, the returned value
+            is an iterator of tuples.
         """
 
         if return_format not in {'xyz', 'yz', 'z'}:
@@ -718,15 +862,15 @@ class Learner(ABC):
             dl: DataLoader,
             raw_out: bool = True,
             batched_output: bool = True,
-            predict_kw: dict = {}) -> Iterator[Tuple[Tensor, Any, Any]]:
+            predict_kw: dict = {}) -> Iterator[tuple[Tensor, Any, Any]]:
         """Returns an iterator over predictions on the given dataloader.
 
         Args:
             dl (DataLoader): The dataloader to make predictions on.
-            batched_output (bool, optional): If True, return batches of
+            batched_output (bool): If True, return batches of
                 x, y, z as defined by the dataloader. If False, unroll the
                 batches into individual items. Defaults to True.
-            raw_out (bool, optional): If true, return raw predicted scores.
+            raw_out (bool): If true, return raw predicted scores.
                 Defaults to True.
             predict_kw (dict): Dict with keywords passed to Learner.predict().
                 Useful if a Learner subclass implements a custom predict()
@@ -736,7 +880,7 @@ class Learner(ABC):
             ValueError: If return_format is not one of the allowed values.
 
         Yields:
-            Iterator[Tuple[Tensor, Any, Any]]: 3-tuples of x, y, and z, which
+            Iterator[tuple[Tensor, Any, Any]]: 3-tuples of x, y, and z, which
                 might or might not be batched depending on the batched_output
                 argument.
         """
@@ -778,33 +922,160 @@ class Learner(ABC):
     #########
     # Setup
     #########
-    def setup_training(self, loss_def_path: Optional[str] = None) -> None:
+    def setup_ddp_params(self):
+        """Set up and validate params related to PyTorch DDP."""
+
+        ddp_allowed = rv_config.get_namespace_option(
+            'rastervision', 'USE_DDP', True, as_bool=True)
+        self.ddp_start_method = rv_config.get_namespace_option(
+            'rastervision', 'DDP_START_METHOD', 'spawn').lower()
+
+        self.is_ddp_process = False
+        self.is_ddp_master = False
+        self.is_ddp_local_master = False
+        self.avoid_activating_cuda_runtime = False
+
+        self.ddp_world_size = get_env_var('WORLD_SIZE', None, int)
+        self.ddp_rank = get_env_var('RANK', None, int)
+        self.ddp_local_rank = get_env_var('LOCAL_RANK', None, int)
+        ddp_vars_set = all(
+            v is not None
+            for v in [self.ddp_world_size, self.ddp_rank, self.ddp_local_rank])
+
+        if not ddp_allowed or not self.training:
+            self.distributed = False
+        elif ddp_vars_set:  # pragma: no cover
+            self.distributed = True
+            self.is_ddp_process = True
+            self.is_ddp_master = self.ddp_rank == 0
+            self.is_ddp_local_master = self.ddp_local_rank == 0
+        elif self.ddp_start_method != 'spawn':
+            # If ddp_start_method is "fork" or "forkserver", the CUDA runtime
+            # must not be initialized before the fork; otherwise, a
+            # "RuntimeError: Cannot re-initialize CUDA in forked subprocess."
+            # error will be raised. We can avoid initializing it by not
+            # calling any torch.cuda functions or creating tensors on the GPU.
+            if self.ddp_world_size is None:
+                raise ValueError(
+                    'WORLD_SIZE env variable must be specified if '
+                    'RASTERVISION_DDP_START_METHOD is not "spawn".')
+            self.distributed = True
+            self.avoid_activating_cuda_runtime = True
+        elif torch.cuda.is_available():
+            dist_available = dist.is_available()
+            gpu_count = torch.cuda.device_count()
+            multi_gpus = gpu_count > 1
+            self.distributed = ddp_allowed and dist_available and multi_gpus
+            if self.distributed:
+                log.info(
+                    'Multiple GPUs detected (%d), will use DDP for training.',
+                    gpu_count)
+                world_size_is_set = self.ddp_world_size is not None
+                if not world_size_is_set:
+                    self.ddp_world_size = gpu_count
+                if world_size_is_set and self.ddp_world_size < gpu_count:
+                    log.info('Using only WORLD_SIZE=%d of total %d GPUs.',
+                             self.ddp_world_size, gpu_count)
+        else:
+            self.distributed = False
+
+        if not self.distributed:
+            return
+
+        # pragma: no cover
+        if self.model is not None:
+            raise ValueError(
+                'In distributed mode, the model must be specified via '
+                'ModelConfig in LearnerConfig rather than be passed '
+                'as an instantiated object.')
+
+        dses_passed = any([self.train_ds, self.valid_ds, self.test_ds])
+        if dses_passed and self.ddp_start_method != 'fork':
+            raise ValueError(
+                'In distributed mode, if '
+                'RASTERVISION_DDP_START_METHOD != "fork", datasets must be '
+                'specified via DataConfig in LearnerConfig rather than be '
+                'passed as instantiated objects.')
+
+        if self.ddp_local_rank is not None:
+            self.device = torch.device('cuda', self.ddp_local_rank)
+
+        log.info('Using DDP')
+        log.info(f'World size: {self.ddp_world_size}')
+        log.info(f'DDP start method: {self.ddp_start_method}')
+        if self.is_ddp_process:
+            log.info(f'DDP rank: {self.ddp_rank}')
+            log.info(f'DDP local rank: {self.ddp_local_rank}')
+
+    def setup_training(self, loss_def_path: str | None = None) -> None:
+        """Set up model, data, loss, optimizers and various paths.
+
+        The exact behavior differs based on whether this method is called in
+        a distributed scenario.
+
+        Args:
+            loss_def_path: A local path to a directory with a ``hubconf.py``. If
+                provided, the loss function definition is imported from here.
+                This is used when loading an external loss function from a
+                model-bundle. Defaults to ``None``.
+        """
         cfg = self.cfg
 
-        self.config_path = join(self.output_dir, 'learner-config.json')
-        str_to_file(cfg.json(), self.config_path)
-
+        self.config_path = join(self.output_dir_local, 'learner-config.json')
+        cfg.to_file(self.config_path)
         self.log_path = join(self.output_dir_local, 'log.csv')
-
-        # data
-        self.setup_data()
-
-        # model
         self.last_model_weights_path = join(self.output_dir_local,
                                             'last-model.pth')
-        self.load_checkpoint()
 
-        # optimization
+        if not self.distributed:
+            # data
+            self.setup_data()
+            # model
+            self.load_checkpoint()
+            # optimization
+            start_epoch = self.get_start_epoch()
+            self.setup_loss(loss_def_path=loss_def_path)
+            if self.opt is None:
+                self.opt = self.build_optimizer()
+            if self.step_scheduler is None:
+                self.step_scheduler = self.build_step_scheduler(start_epoch)
+            if self.epoch_scheduler is None:
+                self.epoch_scheduler = self.build_epoch_scheduler(start_epoch)
+            self.setup_tensorboard()
+            return
+
+        # DDP
+        if self.is_ddp_process and dist.is_initialized():  # pragma: no cover
+            # model
+            if self.model is not None:
+                self.load_checkpoint()
+            # data
+            self.setup_data()
+            # optimization
+            start_epoch = self.get_start_epoch()
+            self.setup_loss(loss_def_path=loss_def_path)
+            if self.opt is None:
+                self.opt = self.build_optimizer()
+            if self.step_scheduler is None:
+                self.step_scheduler = self.build_step_scheduler(start_epoch)
+            if self.epoch_scheduler is None:
+                self.epoch_scheduler = self.build_epoch_scheduler(start_epoch)
+
+            if self.is_ddp_master:
+                self.setup_tensorboard()
+        else:  # pragma: no cover
+            if self.ddp_start_method == 'fork':
+                self.setup_data()
+
+    def get_start_and_end_epochs(self,
+                                 epochs: int | None = None) -> tuple[int, int]:
+        """Get start and end epochs given epochs."""
         start_epoch = self.get_start_epoch()
-        self.setup_loss(loss_def_path=loss_def_path)
-        if self.opt is None:
-            self.opt = self.build_optimizer()
-        if self.step_scheduler is None:
-            self.step_scheduler = self.build_step_scheduler(start_epoch)
-        if self.epoch_scheduler is None:
-            self.epoch_scheduler = self.build_epoch_scheduler(start_epoch)
-
-        self.setup_tensorboard()
+        if epochs is None:
+            end_epoch = self.cfg.solver.num_epochs
+        else:
+            end_epoch = start_epoch + epochs
+        return start_epoch, end_epoch
 
     def get_start_epoch(self) -> int:
         """Get start epoch.
@@ -824,107 +1095,160 @@ class Learner(ABC):
         return start_epoch
 
     def setup_model(self,
-                    model_weights_path: Optional[str] = None,
-                    model_def_path: Optional[str] = None) -> None:
+                    model_weights_path: str | None = None,
+                    model_def_path: str | None = None) -> None:
         """Setup self.model.
 
         Args:
-            model_weights_path (Optional[str], optional): Path to model
+            model_weights_path (str | None): Path to model
                 weights. Will be available when loading from a bundle.
                 Defaults to None.
-            model_def_path (Optional[str], optional): Path to model definition.
+            model_def_path (str | None): Path to model definition.
                 Will be available when loading from a bundle. Defaults to None.
         """
-        self._onnx_mode = (model_weights_path is not None
-                           and model_weights_path.lower().endswith('.onnx'))
-        if self._onnx_mode:
+        if self.onnx_mode:
             self.model = self.load_onnx_model(model_weights_path)
             return
         if self.model is None:
             self.model = self.build_model(model_def_path=model_def_path)
         self.model.to(device=self.device)
+        if self.is_ddp_process and not isinstance(self.model,
+                                                  DDP):  # pragma: no cover
+            self.model = nn.SyncBatchNorm.convert_sync_batchnorm(self.model)
+            self.model = DDP(self.model, device_ids=[self.ddp_local_rank])
         self.load_init_weights(model_weights_path=model_weights_path)
 
-    def build_model(self, model_def_path: Optional[str] = None) -> nn.Module:
+    def build_model(self, model_def_path: str | None = None) -> nn.Module:
         """Build a PyTorch model."""
         cfg = self.cfg
 
         in_channels = cfg.data.img_channels
         if in_channels is None:
-            log.warn('DataConfig.img_channels is None. Defaulting to 3.')
+            log.warning('DataConfig.img_channels is None. Defaulting to 3.')
             in_channels = 3
 
         model = cfg.model.build(
             num_classes=cfg.data.num_classes,
             in_channels=in_channels,
             save_dir=self.modules_dir,
-            hubconf_dir=model_def_path)
+            hubconf_dir=model_def_path,
+            ddp_rank=self.ddp_local_rank)
         return model
 
-    def setup_data(self):
+    def setup_data(self, distributed: bool | None = None):
         """Set datasets and dataLoaders for train, validation, and test sets.
         """
+        if distributed is None:
+            distributed = self.distributed
+
         if self.train_ds is None or self.valid_ds is None:
-            train_ds, valid_ds, test_ds = self.build_datasets()
+            if distributed:  # pragma: no cover
+                if self.is_ddp_local_master:
+                    train_ds, valid_ds, test_ds = self.build_datasets()
+                    log.debug(f'{self.ddp_rank=} Done.')
+                else:
+                    log.debug(f'{self.ddp_rank=} Waiting.')
+                dist.barrier()
+                if not self.is_ddp_local_master:
+                    train_ds, valid_ds, test_ds = self.build_datasets()
+                    log.debug(f'{self.ddp_rank=} Done.')
+                else:
+                    log.debug(f'{self.ddp_rank=} Waiting.')
+                dist.barrier()
+            else:
+                train_ds, valid_ds, test_ds = self.build_datasets()
+
             if self.train_ds is None:
                 self.train_ds = train_ds
             if self.valid_ds is None:
                 self.valid_ds = valid_ds
             if self.test_ds is None:
                 self.test_ds = test_ds
-        self.train_dl, self.valid_dl, self.test_dl = self.build_dataloaders()
 
-    def build_datasets(self) -> Tuple['Dataset', 'Dataset', 'Dataset']:
+        log.info('Building dataloaders')
+        self.train_dl, self.valid_dl, self.test_dl = self.build_dataloaders(
+            distributed=distributed)
+
+    def build_datasets(self) -> tuple['Dataset', 'Dataset', 'Dataset']:
+        """Build Datasets for train, validation, and test splits."""
         log.info(f'Building datasets ...')
-        cfg = self.cfg
-        train_ds, val_ds, test_ds = self.cfg.data.build(
-            tmp_dir=self.tmp_dir,
-            overfit_mode=cfg.overfit_mode,
-            test_mode=cfg.test_mode)
+        train_ds, val_ds, test_ds = self.cfg.data.build(tmp_dir=self.tmp_dir)
         return train_ds, val_ds, test_ds
 
-    def build_dataloaders(self) -> Tuple[DataLoader, DataLoader, DataLoader]:
-        """Set the DataLoaders for train, validation, and test sets."""
+    def build_dataset(self,
+                      split: Literal['train', 'valid', 'test']) -> 'Dataset':
+        """Build Dataset for split."""
+        log.info('Building %s dataset ...', split)
+        ds = self.cfg.data.build_dataset(split=split, tmp_dir=self.tmp_dir)
+        return ds
+
+    def build_dataloaders(
+            self, distributed: bool | None = None
+    ) -> tuple[DataLoader, DataLoader, DataLoader | None]:
+        """Build DataLoaders for train, validation, and test splits."""
+        if distributed is None:
+            distributed = self.distributed
+
+        train_dl = self.build_dataloader('train', distributed=distributed)
+        val_dl = self.build_dataloader('valid', distributed=distributed)
+
+        test_dl = None
+        if self.test_ds is not None and len(self.test_ds) > 0:
+            test_dl = self.build_dataloader('test', distributed=distributed)
+
+        return train_dl, val_dl, test_dl
+
+    def build_dataloader(self,
+                         split: Literal['train', 'valid', 'test'],
+                         distributed: bool | None = None,
+                         **kwargs) -> DataLoader:
+        """Build DataLoader for split."""
+        if distributed is None:
+            distributed = self.distributed
+
+        ds = self.get_dataset(split)
+        if ds is None:
+            ds = self.build_dataset(split)
 
         batch_sz = self.cfg.solver.batch_sz
         num_workers = self.cfg.data.num_workers
         collate_fn = self.get_collate_fn()
+        sampler = self.build_sampler(ds, split, distributed=distributed)
 
-        train_sampler = self.get_train_sampler(self.train_ds)
-        train_shuffle = train_sampler is None
-        # batchnorm layers expect batch size > 1 during training
-        train_drop_last = (len(self.train_ds) % batch_sz) == 1
-        train_dl = DataLoader(
-            self.train_ds,
+        if distributed:  # pragma: no cover
+            world_sz = self.ddp_world_size
+            if world_sz is None:
+                raise ValueError('World size not set. '
+                                 'Cannot determine per-process batch size.')
+            if world_sz > batch_sz:
+                raise ValueError(f'World size ({world_sz}) is greater '
+                                 f'than total batch size ({batch_sz}).')
+            batch_sz //= world_sz
+            log.debug('Per GPU batch size: %d', batch_sz)
+
+        args = dict(
             batch_size=batch_sz,
-            shuffle=train_shuffle,
-            drop_last=train_drop_last,
             num_workers=num_workers,
+            collate_fn=collate_fn,
             pin_memory=True,
-            collate_fn=collate_fn,
-            sampler=train_sampler)
+            multiprocessing_context='fork' if distributed else None,
+        )
+        args.update(**kwargs)
 
-        val_dl = DataLoader(
-            self.valid_ds,
-            batch_size=batch_sz,
-            shuffle=True,
-            num_workers=num_workers,
-            collate_fn=collate_fn,
-            pin_memory=True)
+        if sampler is not None:
+            args['sampler'] = sampler
+        else:
+            if split == 'train':
+                args['shuffle'] = True
+                # batchnorm layers expect batch size > 1 during training
+                args['drop_last'] = (len(ds) % batch_sz) == 1
+            else:
+                args['shuffle'] = False
 
-        test_dl = None
-        if self.test_ds is not None and len(self.test_ds) > 0:
-            test_dl = DataLoader(
-                self.test_ds,
-                batch_size=batch_sz,
-                shuffle=True,
-                num_workers=num_workers,
-                collate_fn=collate_fn,
-                pin_memory=True)
+        dl = DataLoader(ds, **args)
+        return dl
 
-        return train_dl, val_dl, test_dl
-
-    def get_collate_fn(self) -> Optional[callable]:
+    def get_collate_fn(self) -> Callable | None:
         """Returns a custom collate_fn to use in DataLoader.
 
         None is returned if default collate_fn should be used.
@@ -933,15 +1257,34 @@ class Learner(ABC):
         """
         return None
 
-    def get_train_sampler(self, train_ds: 'Dataset') -> Optional['Sampler']:
-        """Return an optional sampler for the training dataloader."""
-        return None
+    def build_sampler(self,
+                      ds: 'Dataset',
+                      split: Literal['train', 'valid', 'test'],
+                      distributed: bool = False) -> 'Sampler | None':
+        """Build an optional sampler for the split's dataloader."""
+        split = split.lower()
+        sampler = None
+        if split == 'train':
+            if distributed:  # pragma: no cover
+                sampler = DistributedSampler(
+                    ds,
+                    shuffle=True,
+                    num_replicas=self.ddp_world_size,
+                    rank=self.ddp_rank)
+        elif split == 'valid':
+            if distributed:  # pragma: no cover
+                sampler = DistributedSampler(
+                    ds,
+                    shuffle=False,
+                    num_replicas=self.ddp_world_size,
+                    rank=self.ddp_rank)
+        return sampler
 
-    def setup_loss(self, loss_def_path: Optional[str] = None) -> None:
+    def setup_loss(self, loss_def_path: str | None = None) -> None:
         """Setup self.loss.
 
         Args:
-            loss_def_path (str, optional): Loss definition path. Will be
+            loss_def_path (str): Loss definition path. Will be
             available when loading from a bundle. Defaults to None.
         """
         if self.loss is None:
@@ -950,7 +1293,8 @@ class Learner(ABC):
         if self.loss is not None and isinstance(self.loss, nn.Module):
             self.loss.to(self.device)
 
-    def build_loss(self, loss_def_path: Optional[str] = None) -> Callable:
+    def build_loss(self,
+                   loss_def_path: str | None = None) -> Callable[..., Tensor]:
         """Build a loss Callable."""
         cfg = self.cfg
         loss = cfg.solver.build_loss(
@@ -979,13 +1323,12 @@ class Learner(ABC):
     # Visualization
     ################
     @abstractmethod
-    def get_visualizer_class(self) -> Type[Visualizer]:
+    def get_visualizer_class(self) -> type[Visualizer]:
         """Returns a Visualizer class object for plotting data samples."""
-        pass
 
     def plot_predictions(self,
-                         split: str,
-                         batch_limit: Optional[int] = None,
+                         split: Literal['train', 'valid', 'test'],
+                         batch_limit: int | None = None,
                          show: bool = False):
         """Plot predictions for a split.
 
@@ -1009,7 +1352,7 @@ class Learner(ABC):
     def plot_dataloader(self,
                         dl: DataLoader,
                         output_path: str,
-                        batch_limit: Optional[int] = None,
+                        batch_limit: int | None = None,
                         show: bool = False):
         """Plot images and ground truth labels for a DataLoader."""
         x, y = next(iter(dl))
@@ -1017,7 +1360,7 @@ class Learner(ABC):
             x, y, output_path, batch_limit=batch_limit, show=show)
 
     def plot_dataloaders(self,
-                         batch_limit: Optional[int] = None,
+                         batch_limit: int | None = None,
                          show: bool = False):
         """Plot images and ground truth labels for all DataLoaders."""
         if self.train_dl:
@@ -1054,9 +1397,6 @@ class Learner(ABC):
         This is a zip file with the model weights in .pth format and a serialized
         copy of the LearningConfig, which allows for making predictions in the future.
         """
-        from rastervision.pytorch_learner.learner_pipeline_config import (
-            LearnerPipelineConfig)
-
         if self.cfg.model is None:
             log.warning(
                 'Model was not configured via ModelConfig, and therefore, '
@@ -1072,9 +1412,8 @@ class Learner(ABC):
         self._bundle_modules(model_bundle_dir)
         self._bundle_transforms(model_bundle_dir)
 
-        pipeline_cfg = LearnerPipelineConfig(learner=self.cfg)
-        save_pipeline_config(pipeline_cfg,
-                             join(model_bundle_dir, 'pipeline-config.json'))
+        cfg_uri = join(model_bundle_dir, 'learner-config.json')
+        shutil.copy(self.config_path, cfg_uri)
 
         zip_path = join(self.output_dir_local, basename(self.model_bundle_uri))
         log.info(f'Saving bundle to {zip_path}.')
@@ -1082,62 +1421,73 @@ class Learner(ABC):
 
     def _bundle_model(self, model_bundle_dir: str,
                       export_onnx: bool = True) -> None:
-        """Save model weights and copy them to bundle dir.."""
-        # pytorch
+        """Save model weights and copy them to bundle dir."""
+        model_not_set = self.model is None
+        if model_not_set:
+            self.model = self.build_model(self.init_model_def_path).cpu()
+            self.load_checkpoint()
+
         path = join(model_bundle_dir, BUNDLE_MODEL_WEIGHTS_FILENAME)
         if file_exists(self.last_model_weights_path):
             shutil.copyfile(self.last_model_weights_path, path)
         else:
-            torch.save(self.model.state_dict(), path)
+            self.save_weights(path)
 
         # ONNX
         if export_onnx:
             path = join(model_bundle_dir, BUNDLE_MODEL_ONNX_FILENAME)
             self.export_to_onnx(path)
 
+        if model_not_set:
+            self.model = None
+            gc.collect()
+
     def export_to_onnx(self,
                        path: str,
-                       model: Optional['nn.Module'] = None,
-                       sample_input: Optional[Tensor] = None,
+                       model: nn.Module | None = None,
+                       sample_input: Tensor | None = None,
                        validate_export: bool = True,
                        **kwargs) -> None:
         """Export model to ONNX format via :func:`torch.onnx.export`.
 
         Args:
-            path (str): File path to save to.
-            model (Optional[nn.Module]): The model to export. If None,
-                self.model will be used. Defaults to None.
-            sample_input (Optional[Tensor]): Sample input to the model. If
-                None, a single batch from any available DataLoader in this
-                Learner will be used. Defaults to None.
-            validate_export (bool): If True, use
-                :func:`onnx.checker.check_model` to validate exported model.
-                An exception is raised if the check fails. Defaults to True.
-            **kwargs (dict): Keyword args to pass to :func:`torch.onnx.export`.
+            path: File path to save to.
+            model: The model to export. If ``None``,
+                ``self.model`` will be used. Defaults to ``None``.
+            sample_input: Sample input to the model. If ``None``, a single
+                batch from any available ``DataLoader`` in this ``Learner``
+                will be used. Defaults to ``None``.
+            validate_export: If ``True``, use :func:`onnx.checker.check_model`
+                to validate exported model. An exception is raised if the check
+                fails. Defaults to ``True``.
+            **kwargs: Keyword args to pass to :func:`torch.onnx.export`.
                 These override the default values used in the function
                 definition.
 
         Raises:
-            ValueError: If sample_input is None and the Learner has no valid
+            ValueError: If sample_input is ``None`` and the Learner has no valid
                 DataLoaders.
         """
         if model is None:
             model = self.model
 
+        if isinstance(model, DDP):
+            model = model.module
+
         training_state = model.training
 
         model.eval()
         if sample_input is None:
-            for split in ['train', 'valid', 'test']:
-                dl = self.get_dataloader(split)
-                if dl is not None:
-                    break
-            else:
-                raise ValueError('sample_input not provided and Learner does '
-                                 'not have a DataLoader to get sample input '
-                                 'from.')
+            dl = self.valid_dl
+            if dl is None:
+                dl = self.build_dataloader(
+                    'valid', batch_size=1, num_workers=0, distributed=False)
             sample_input, _ = next(iter(dl))
-        sample_input = self.to_device(sample_input, self.device)
+
+        model_device = next(model.parameters()).device
+        if model_device.type == 'cuda':
+            torch.cuda.empty_cache()
+        sample_input = self.to_device(sample_input, model_device)
 
         args = dict(
             input_names=['x'],
@@ -1203,6 +1553,40 @@ class Learner(ABC):
     #########
     # Misc.
     #########
+    def ddp(self, rank: int | None = None, world_size: int | None = None
+            ) -> DDPContextManager:  # pragma: no cover
+        """Return a :class:`DDPContextManager`.
+
+        This should be used to wrap code that needs to be executed in parallel.
+        It is safe call this recursively; recusive calls will have no affect.
+
+        Note that :class:`DDPContextManager` does not start processes itself,
+        but merely initializes and destroyes DDP process groups.
+
+        Usage:
+
+        .. code-block:: python
+
+            with learner.ddp([rank], [world_size]):
+                ...
+
+        """
+        if not self.distributed:
+            raise ValueError('self.distributed is False')
+        return DDPContextManager(self, rank, world_size)
+
+    def reduce_distributed_metrics(self, metrics: dict):  # pragma: no cover
+        """Average numeric metrics across processes."""
+        for k in metrics.keys():
+            v = metrics[k]
+            if isinstance(v, (float, int)):
+                v = torch.tensor(v, device=self.device)
+            if isinstance(v, Tensor):
+                dist.reduce(v, dst=0, op=dist.ReduceOp.SUM)
+                if self.is_ddp_master:
+                    metrics[k] = (v / self.ddp_world_size).item()
+        return metrics
+
     def post_forward(self, x: Any) -> Any:
         """Post process output of call to model().
 
@@ -1223,7 +1607,7 @@ class Learner(ABC):
             x = x[None, ...]
         return x
 
-    def to_device(self, x: Any, device: str) -> Any:
+    def to_device(self, x: Any, device: str | torch.device) -> Any:
         """Load Tensors onto a device.
 
         Args:
@@ -1238,7 +1622,23 @@ class Learner(ABC):
         else:
             return x.to(device)
 
-    def get_dataloader(self, split: str) -> DataLoader:
+    def get_dataset(self, split: Literal['train', 'valid', 'test']
+                    ) -> DataLoader | None:
+        """Get the Dataset for a split.
+
+        Args:
+            split: a split name which can be train, valid, or test
+        """
+        if split == 'train':
+            return self.train_ds
+        if split == 'valid':
+            return self.valid_ds
+        if split == 'test':
+            return self.test_ds
+        raise ValueError(f'{split} is not a valid split')
+
+    def get_dataloader(self,
+                       split: Literal['train', 'valid', 'test']) -> DataLoader:
         """Get the DataLoader for a split.
 
         Args:
@@ -1246,12 +1646,11 @@ class Learner(ABC):
         """
         if split == 'train':
             return self.train_dl
-        elif split == 'valid':
+        if split == 'valid':
             return self.valid_dl
-        elif split == 'test':
+        if split == 'test':
             return self.test_dl
-        else:
-            raise ValueError('{} is not a valid split'.format(split))
+        raise ValueError(f'{split} is not a valid split')
 
     def normalize_input(self, x: np.ndarray) -> np.ndarray:
         """Normalize x to [0, 1].
@@ -1270,8 +1669,7 @@ class Learner(ABC):
             x = x.astype(float) / max_val
         return x
 
-    def load_init_weights(self,
-                          model_weights_path: Optional[str] = None) -> None:
+    def load_init_weights(self, model_weights_path: str | None = None) -> None:
         """Load the weights to initialize model."""
         cfg = self.cfg
         uri = None
@@ -1290,6 +1688,13 @@ class Learner(ABC):
         log.info(f'Loading model weights from: {uri}')
         self.load_weights(uri=uri, **args)
 
+    def save_weights(self, path: str):
+        """Save model weights to a local file."""
+        model = self.model
+        if isinstance(model, DDP):
+            model = model.module
+        torch.save(model.state_dict(), path)
+
     def load_weights(self, uri: str, **kwargs) -> None:
         """Load model weights from a file.
 
@@ -1298,7 +1703,10 @@ class Learner(ABC):
             **kwargs: Extra args for :meth:`nn.Module.load_state_dict`.
         """
         weights_path = download_if_needed(uri)
-        self.model.load_state_dict(
+        model = self.model
+        if isinstance(model, DDP):
+            model = model.module
+        model.load_state_dict(
             torch.load(weights_path, map_location=self.device), **kwargs)
 
     def load_checkpoint(self):
@@ -1313,7 +1721,8 @@ class Learner(ABC):
 
     def load_onnx_model(self, model_path: str) -> ONNXRuntimeAdapter:
         log.info(f'Loading ONNX model from {model_path}')
-        onnx_model = ONNXRuntimeAdapter.from_file(model_path)
+        path = download_if_needed(model_path)
+        onnx_model = ONNXRuntimeAdapter.from_file(path)
         return onnx_model
 
     def log_data_stats(self):
@@ -1343,20 +1752,18 @@ class Learner(ABC):
 
     def run_tensorboard(self):
         """Run TB server serving logged stats."""
-        if self.cfg.run_tensorboard:
+        if self.cfg.run_tensorboard:  # pragma: no cover
             log.info('Starting tensorboard process')
-            self.tb_process = Popen([
-                'tensorboard', '--bind_all',
-                '--logdir={}'.format(self.tb_log_dir)
-            ])
+            self.tb_process = Popen(
+                ['tensorboard', '--bind_all', f'--logdir={self.tb_log_dir}'])
             terminate_at_exit(self.tb_process)
 
     def stop_tensorboard(self):
         """Stop TB logging and server if it's running."""
-        if self.cfg.log_tensorboard:
+        if self.tb_writer is not None:
             self.tb_writer.close()
-            if self.cfg.run_tensorboard:
-                self.tb_process.terminate()
+        if self.tb_process is not None:  # pragma: no cover
+            self.tb_process.terminate()
 
     @property
     def onnx_mode(self) -> bool:

@@ -17,8 +17,8 @@ local
 A ``rastervision run local ...`` command will use the ``LocalRunner``, which
 builds a ``Makefile`` based on the pipeline and executes it on the host machine. This will run multiple pipelines in parallel, as well as splittable commands in parallel, by spawning new processes for each command, where each process runs ``rastervision run_command ...``.
 
-inprocess
-^^^^^^^^^^
+``inprocess``
+^^^^^^^^^^^^^
 
 For debugging purposes, using ``rastervision run inprocess`` will run everything sequentially within a single process.
 
@@ -27,8 +27,8 @@ For debugging purposes, using ``rastervision run inprocess`` will run everything
 Running remotely
 -----------------
 
-batch
-^^^^^^
+``batch``
+^^^^^^^^^
 
 Running ``rastervision run batch ...`` will submit a DAG (directed acyclic graph) of jobs to be run on AWS Batch, which will increase the instance count to meet the workload with low-cost spot instances, and terminate the instances when the queue of commands is finished. It can also run some commands on CPU instances (like ``chip``), and others on GPU (like ``train``), and will run multiple experiments in parallel, as well as splittable commands in parallel.
 
@@ -40,8 +40,36 @@ executing, and will fail the command if any upstream commands fail.
 
 If you are running on AWS Batch or any other remote runner, you will not be able to use your local file system to store any of the data associated with an experiment.
 
+Sample command:
+
+.. code-block:: console
+
+   rastervision run batch \
+	   "rastervision_pytorch_backend/rastervision/pytorch_backend/examples/semantic_segmentation/isprs_potsdam.py" \
+	   -a raw_uri "s3://raster-vision-raw-data/isprs-potsdam" \
+	   -a root_uri "s3://your-bucket/isprs_potsdam/"
+
 .. note::
    To run on AWS Batch, you'll need the proper setup. See :ref:`aws batch setup` for instructions.
+
+.. _aws sagemaker:
+
+``sagemaker``
+^^^^^^^^^^^^^
+
+Running ``rastervision run sagemaker ...`` will submit a DAG (directed acyclic graph) of jobs represented as a SageMaker Pipeline to be run on AWS SageMaker.
+
+Sample command:
+
+.. code-block:: console
+
+   SAGEMAKER_TRAIN_INSTANCE_TYPE=ml.p3.8xlarge SAGEMAKER_TRAIN_INSTANCE_COUNT=2 rastervision run sagemaker \
+	   "rastervision_pytorch_backend/rastervision/pytorch_backend/examples/semantic_segmentation/isprs_potsdam.py" \
+	   -a raw_uri "s3://raster-vision-raw-data/isprs-potsdam" \
+	   -a root_uri "s3://your-bucket/isprs_potsdam/"
+
+.. note::
+   To run on AWS SageMaker, you'll need the proper setup. See :ref:`aws sagemaker setup` for instructions.
 
 .. _parallelizing commands:
 

@@ -1,20 +1,25 @@
-from typing import Any, Callable
+from typing import Any
+from collections.abc import Callable
+from os.path import join
 import unittest
 from uuid import uuid4
 
 import numpy as np
 
-from rastervision.pipeline.file_system import get_tmp_dir
+from rastervision.pipeline.file_system import get_tmp_dir, json_to_file
+from rastervision.core.box import Box
 from rastervision.core.data import (
-    ClassConfig, DatasetConfig, RasterioSourceConfig, MultiRasterSourceConfig,
-    ReclassTransformerConfig, SceneConfig, ObjectDetectionLabelSourceConfig,
-    GeoJSONVectorSourceConfig, ClassInferenceTransformerConfig)
-from rastervision.core.rv_pipeline import ObjectDetectionConfig
+    ClassConfig, ClassInferenceTransformerConfig, DatasetConfig,
+    GeoJSONVectorSourceConfig, geoms_to_geojson, pixel_to_map_coords,
+    RasterioCRSTransformer, RasterioSourceConfig, MultiRasterSourceConfig,
+    ReclassTransformerConfig, SceneConfig, ObjectDetectionLabelSourceConfig)
+from rastervision.core.rv_pipeline import (ObjectDetectionConfig,
+                                           ObjectDetectionWindowSamplingConfig,
+                                           WindowSamplingMethod)
 from rastervision.pytorch_backend import PyTorchObjectDetectionConfig
 from rastervision.pytorch_learner import (
     ObjectDetectionModelConfig, SolverConfig, ObjectDetectionGeoDataConfig,
-    PlotOptions, ObjectDetectionGeoDataWindowConfig, Backbone,
-    GeoDataWindowMethod)
+    PlotOptions, Backbone)
 from tests import data_file_path
 
 
@@ -34,9 +39,18 @@ def make_scene(num_channels: int, num_classes: int,
     rs_cfg_img = MultiRasterSourceConfig(
         raster_sources=rs_cfgs_img, channel_order=list(range(num_channels)))
 
+    extent = Box(0, 0, 600, 600)
+    geoms = [extent.make_random_square(20).to_shapely() for _ in range(20)]
+    props = [dict(class_id=np.random.randint(0, num_classes)) for _ in geoms]
+    geojson = geoms_to_geojson(geoms, properties=props)
+    geojson = pixel_to_map_coords(geojson,
+                                  RasterioCRSTransformer.from_uri(path))
+    label_uri = join(tmp_dir, 'labels.json')
+    json_to_file(geojson, label_uri)
+
     label_source_cfg = ObjectDetectionLabelSourceConfig(
         vector_source=GeoJSONVectorSourceConfig(
-            uris=data_file_path('bboxes.geojson'),
+            uris=label_uri,
             transformers=[ClassInferenceTransformerConfig(
                 default_class_id=0)]))
     scene_cfg = SceneConfig(
@@ -84,10 +98,12 @@ class TestObjectDetectionLearner(unittest.TestCase):
                 test_scenes=[])
             data_cfg = ObjectDetectionGeoDataConfig(
                 scene_dataset=dataset_cfg,
-                window_opts=ObjectDetectionGeoDataWindowConfig(
-                    method=GeoDataWindowMethod.random, size=20, max_windows=8),
-                class_names=class_config.names,
-                class_colors=class_config.colors,
+                sampling=ObjectDetectionWindowSamplingConfig(
+                    method=WindowSamplingMethod.random,
+                    size=200,
+                    max_windows=8,
+                    neg_ratio=0.5),
+                class_config=class_config,
                 plot_options=PlotOptions(
                     channel_display_groups=channel_display_groups),
                 num_workers=0)
@@ -107,14 +123,6 @@ class TestObjectDetectionLearner(unittest.TestCase):
             learner.train()
             learner.plot_predictions(split='valid')
             learner.save_model_bundle()
-
-            learner = None
-            backend.learner = None
-            backend.load_model()
-
-            pred_scene = dataset_cfg.validation_scenes[0].build(
-                class_config, tmp_dir)
-            _ = backend.predict_scene(pred_scene, chip_sz=100)
 
 
 if __name__ == '__main__':

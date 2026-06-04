@@ -14,8 +14,33 @@ jobs:
       DOCKER_BUILDKIT: 1
       IMAGE_TYPE: ${{ matrix.image_type }}
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
+
+      - run: df -hT
+
+      - run: rm -rf /opt/hostedtoolcache
+
+      - run: df -hT
 
       - run: ./scripts/cibuild
 
-      - uses: codecov/codecov-action@v2
+      - run: df -hT
+
+      - run: docker system prune -f
+
+      - run: df -hT
+
+      - run: ./scripts/test "style_tests"
+
+      - run: ./scripts/test "unit_tests"
+
+      - run: df -hT
+
+      - run: ./scripts/test "integration_tests"
+
+      - run: ./scripts/test "coverage"
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}

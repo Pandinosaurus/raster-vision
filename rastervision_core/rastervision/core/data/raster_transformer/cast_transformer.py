@@ -1,5 +1,3 @@
-from typing import Optional
-
 from rastervision.core.data.raster_transformer.raster_transformer \
     import RasterTransformer
 from rastervision.pipeline.utils import repr_with_args
@@ -21,14 +19,16 @@ class CastTransformer(RasterTransformer):
     def __repr__(self):
         return repr_with_args(self, to_dtype=str(self.to_dtype))
 
-    def transform(self, chip: np.ndarray,
-                  channel_order: Optional[list] = None) -> np.ndarray:
-        """Cast chip to self.to_dtype.
+    def transform(self, chip: np.ndarray) -> np.ndarray:
+        """Cast chip to dtype ``self.to_dtype``.
 
         Args:
-            chip: ndarray of shape [height, width, channels]
+            chip: Array of shape (..., H, W, C).
 
         Returns:
-            [height, width, channels] numpy array
+            Array of shape (..., H, W, C)
         """
         return chip.astype(self.to_dtype)
+
+    def get_out_dtype(self, in_dtype: 'np.dtype') -> 'np.dtype':
+        return self.to_dtype

@@ -1,10 +1,11 @@
 """Defines ``ClassEvaluationItem``."""
-
-from typing import Optional
-
+from typing import TYPE_CHECKING
 import numpy as np
 
 from rastervision.core.evaluation import EvaluationItem
+
+if TYPE_CHECKING:
+    from typing import Self
 
 
 class ClassEvaluationItem(EvaluationItem):
@@ -33,7 +34,7 @@ class ClassEvaluationItem(EvaluationItem):
                  tp: int,
                  fp: int,
                  fn: int,
-                 tn: Optional[int] = None,
+                 tn: int | None = None,
                  **kwargs):
         """Constructor.
 
@@ -43,7 +44,7 @@ class ClassEvaluationItem(EvaluationItem):
             tp (int): True positive count.
             fp (int): False positive count.
             fn (int): False negative count.
-            tn (Optional[int], optional): True negative count.
+            tn (int | None): True negative count.
                 Defaults to None.
             **kwargs: Additional data can be provided as keyword arguments.
                 These will be included in the dict returned by ``to_json()``.
@@ -57,8 +58,7 @@ class ClassEvaluationItem(EvaluationItem):
 
     @classmethod
     def from_multiclass_conf_mat(cls, conf_mat: np.ndarray, class_id: int,
-                                 class_name: str,
-                                 **kwargs) -> 'ClassEvaluationItem':
+                                 class_name: str, **kwargs) -> 'Self':
         """Construct from a multi-class confusion matrix and a target class ID.
 
         Args:
@@ -110,11 +110,11 @@ class ClassEvaluationItem(EvaluationItem):
         return self.conf_mat[1, 1]
 
     @property
-    def true_neg(self) -> Optional[int]:
+    def true_neg(self) -> int | None:
         """True negative count.
 
         Returns:
-            Optional[int]: Count as int if available. Otherwise, None.
+            int | None: Count as int if available. Otherwise, None.
         """
         tn = self.conf_mat[0, 0]
         if tn < 0:
@@ -144,7 +144,7 @@ class ClassEvaluationItem(EvaluationItem):
         return self.recall
 
     @property
-    def specificity(self) -> Optional[float]:
+    def specificity(self) -> float | None:
         """``TN / (TN + FP)``"""
         if self.true_neg is None:
             return None
